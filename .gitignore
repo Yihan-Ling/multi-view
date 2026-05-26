@@ -1,0 +1,74 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+*.egg
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+venv/
+env/
+.venv/
+.env
+.envrc
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# IDE / editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Claude Code
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# ML artifacts — checkpoints, weights, logs
+*.pth
+*.pth.tar
+*.pt
+*.ckpt
+*.onnx
+*.safetensors
+checkpoints/
+runs/
+logs/
+lightning_logs/
+wandb/
+mlruns/
+outputs/
+multirun/
+tb_logs/
+
+# Data — keep schema/metadata in repo, exclude bulk
+data/
+!data/.gitkeep
+!data/README.md
+
+# Models — same idea
+models/
+!models/.gitkeep
+!models/README.md
+
+# Compiled CUDA / C extensions
+*.cu.o
+*.so.*
+
+# Coverage
+.coverage
+htmlcov/
+coverage.xml
