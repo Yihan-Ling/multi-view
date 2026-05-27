@@ -18,14 +18,15 @@ class RGBDPoseResNet50(nn.Module):
         pretrained: bool = True,
     ) -> None:
         super().__init__()
-        weights = ResNet50_Weights.IMAGENET1K_V2 if pretrained else None
+        weights = ResNet50_Weights.IMAGENET1K_V2 if pretrained else None    # IMAGENET1K_2: ImageNet
         rn = resnet50(weights=weights)
 
         original_conv1_weight = rn.conv1.weight.detach().clone() if pretrained else None
-        rn.conv1 = nn.Conv2d(4, 64, kernel_size=7, stride=2, padding=3, bias=False)
+        rn.conv1 = nn.Conv2d(4, 64, kernel_size=7, stride=2, padding=3, bias=False) # Input layer (64, 4, 7, 7)
         if pretrained:
             init_conv1_4ch_from_pretrained(rn.conv1, original_conv1_weight)
 
+        # Include Stage 1-5
         self.conv1 = rn.conv1
         self.bn1 = rn.bn1
         self.relu = rn.relu
@@ -35,6 +36,7 @@ class RGBDPoseResNet50(nn.Module):
         self.layer3 = rn.layer3
         self.layer4 = rn.layer4
 
+        # Add 3 layers of transposed convolution
         self.deconv_head = self._build_deconv_head(
             in_channels=2048,
             num_layers=num_deconv_layers,

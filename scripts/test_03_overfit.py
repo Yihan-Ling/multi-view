@@ -9,11 +9,11 @@ from multi_view import SingleViewLandmarkModel
 
 
 def main() -> None:
-    torch.manual_seed(0)
+    # torch.manual_seed(0)
     num_landmarks = 68
     num_iters = 200
     log_every = 20
-    target_loss = 1e-3
+    target_loss = 1e-6
 
     model = SingleViewLandmarkModel(num_landmarks=num_landmarks, pretrained_backbone=True)
     model.train()
@@ -21,8 +21,10 @@ def main() -> None:
 
     x = torch.randn(1, 4, 256, 256)
     target = torch.randn(1, num_landmarks, 3)
-
+    
     last_loss = float("inf")
+    
+    # 200 iterations of forward - loss - backward -opitimize loop
     for it in range(1, num_iters + 1):
         pred = model(x)
         loss = F.mse_loss(pred, target)
@@ -33,6 +35,7 @@ def main() -> None:
         if it == 1 or it % log_every == 0:
             print(f"iter {it:4d}  loss={last_loss:.6e}")
 
+    # Assert if overfitting on one set of data can converge the loss to zero
     print(f"final loss: {last_loss:.6e}  (target < {target_loss:.0e})")
     if last_loss < target_loss:
         print("test_03_overfit: PASS")
