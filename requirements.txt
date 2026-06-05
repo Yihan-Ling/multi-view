@@ -1,3 +1,6 @@
+# Model / training env (.venv, Python 3.14).
+# FaceScape data-generation deps live separately in requirements-data.txt
+# (installed into .venv-data on Python 3.10).
 torch
 torchvision
 numpy

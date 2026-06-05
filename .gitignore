@@ -15,9 +15,12 @@ dist/
 # Virtual environments
 venv/
 env/
-.venv/
+.venv*
 .env
 .envrc
+
+# Third-party code (cloned via scripts/data/setup_toolkit.sh, not vendored)
+third_party/
 
 # Jupyter
 .ipynb_checkpoints/
@@ -54,15 +57,17 @@ outputs/
 multirun/
 tb_logs/
 
-# Data — keep schema/metadata in repo, exclude bulk
-data/
-!data/.gitkeep
-!data/README.md
+# Data — keep schema/metadata in repo, exclude bulk.
+# Anchored to repo root so source dirs like multi_view/data/ and scripts/data/
+# are NOT ignored.
+/data/
+!/data/.gitkeep
+!/data/README.md
 
 # Models — same idea
-models/
-!models/.gitkeep
-!models/README.md
+/models/
+!/models/.gitkeep
+!/models/README.md
 
 # Compiled CUDA / C extensions
 *.cu.o

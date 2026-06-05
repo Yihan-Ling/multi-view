@@ -1,0 +1,21 @@
+# FaceScape data-generation / render stack.
+#
+# Installed into a SEPARATE venv (.venv-data) on Python 3.10 -- the FaceScape
+# toolkit and pyrender do not have wheels for the model env's Python 3.14, and the
+# render step is offline (writes png/npy that the torch env later reads).
+#
+# Setup:
+#   python3.10 -m venv .venv-data
+#   .venv-data/bin/pip install -r requirements-data.txt
+#   bash scripts/data/setup_toolkit.sh          # clones toolkit + sample data
+# Run (headless GPU):
+#   PYOPENGL_PLATFORM=egl .venv-data/bin/python scripts/data/render_rgbd.py --mode demo
+
+numpy
+trimesh
+pyrender
+opencv-python-headless
+Pillow
+plyfile
+scipy
+tqdm
