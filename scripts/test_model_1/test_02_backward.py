@@ -1,4 +1,4 @@
-import _init_paths  # noqa: F401
+import scripts.test_model_1._init_paths as _init_paths  # noqa: F401
 
 import math
 
