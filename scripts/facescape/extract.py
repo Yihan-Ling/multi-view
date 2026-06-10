@@ -1,34 +1,3 @@
-#!/usr/bin/env python3
-"""Selectively extract FaceScape TU-model source assets from the trainset zip.
-
-Reference facts (not code decisions -- just what's true about the data):
-
-  The zip (facescape_trainset_801_847.zip, ~7.4 GB) holds, per subject id
-  (801-847) and per expression:
-      <id>/models_reg/<exp>.obj       geometry: verts / faces / uv
-      <id>/models_reg/<exp>.jpg       4K texture
-      <id>/models_reg/<exp>.obj.mtl   material (ships Kd=0.0 -> renders black)
-      <id>/dpmap/<exp>.png            displacement map (optional)
-  No RGB-D, no params.json, no photos. The .obj names its .mtl and the .mtl
-  names its .jpg by bare filename -- keep those filenames if you want the links
-  to stay valid.
-"""
-
-
-
-
-# Outline -- what this tool needs to do. You decide the functions, args, layout.
-#
-#   1. Take inputs: which zip, which subject id(s), which expression(s), where to
-#      write, whether to include the dpmap.
-#   2. For a given (id, exp), figure out the archive paths to pull (see the
-#      layout above -- mind the .obj.mtl suffix).
-#   3. Open the zip and extract just those members (not the whole archive),
-#      preserving their relative paths so the mesh/texture links survive.
-#   4. Skip / warn on anything missing instead of crashing the batch.
-#
-# Build it your way from here.
-
 import zipfile, argparse
 from pathlib import Path
 
@@ -48,18 +17,11 @@ class Extract:
         self.out_root = Path(out_root)
 
     def discover_id(self):
-        """
-        Return the sorted, de-duplicated subject ids found in the zip,
-        """
         with zipfile.ZipFile(self.zip_path) as zf:
             names = zf.namelist()        # every entry, e.g. "801/models_reg/1_neutral.obj"
         return sorted({name.split("/")[0] for name in names})
 
     def file_paths(self, id, exp):
-        """
-        Return the list of archive paths to pull for one (id, exp):
-        the .obj, the .jpg, and the .obj.mtl, all under <id>/models_reg/.
-        """
         obj = f"{id}/models_reg/{exp}.obj"
         jpg = f"{id}/models_reg/{exp}.jpg"
         mtl = f"{id}/models_reg/{exp}.obj.mtl"
@@ -67,10 +29,6 @@ class Extract:
 
 
     def extract(self, id, exp):
-        """
-        Extract the members for a single (id, exp) into
-        out_root/<id_range>/<id>/
-        """
         with zipfile.ZipFile(self.zip_path) as zf:
             for f in self.file_paths(id, exp):
                 name = Path(f).name
@@ -97,16 +55,13 @@ class Extract:
 
 
 if __name__ == "__main__":
-    # 1. make a parser
     parser = argparse.ArgumentParser(
         description="Extract FaceScape TU-model assets (.obj/.jpg/.mtl) from the trainset zip."
     )
-    # 2. declare each argument. One worked example -- the positional zip path:
     parser.add_argument("zip_path", help="path to the trainset zip")
     parser.add_argument("--id", default=None)
     parser.add_argument("--exp", default="1_neutral", choices=Extract.EXPRESSIONS)
     
-    # 3. read sys.argv into an object whose attributes are the args above
     args = parser.parse_args()
-    # 4. use them: build the tool and run it
+
     Extract(args.zip_path).run(id=args.id, exp=args.exp)
