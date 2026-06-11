@@ -27,6 +27,7 @@ class Camera:
 @dataclass
 class Light:
     intensity: float
+    ambient: float
     direction: np.ndarray
     
     def __post_init__(self):
@@ -184,7 +185,7 @@ class ViewRenderer:
         return c2w @ np.diag([1.0, -1.0, -1.0, 1.0])
 
     def render(self, mesh, cam, light: Light = None):
-        scene = pyrender.Scene(bg_color=[0, 0, 0, 0], ambient_light=[0.4, 0.4, 0.4])
+        scene = pyrender.Scene(bg_color=[0, 0, 0, 0], ambient_light=[light.ambient if light else 0.5]*3)
         scene.add(pyrender.Mesh.from_trimesh(mesh, smooth=False))
         pcam = pyrender.IntrinsicsCamera(fx=cam.K[0, 0], fy=cam.K[1, 1],
                                          cx=cam.K[0, 2], cy=cam.K[1, 2],
@@ -244,7 +245,7 @@ class ViewRenderer:
         Image.fromarray(landmark_overlay).save(out_dir/"rgb_landmark_overlay.png")
         return landmark_overlay
 
-    def save_panel(self, path, images, labels=None):
+    def make_panel(self, images):
         pil = [Image.fromarray(im) for im in images]
         h = max(im.height for im in pil)
         panel = Image.new("RGB", (sum(im.width for im in pil), h), (0, 0, 0))
@@ -252,7 +253,30 @@ class ViewRenderer:
         for im in pil:
             panel.paste(im, (x, 0))
             x += im.width
+        return panel
+    
+    def save_panel(self, path, images):
+        panel = self.make_panel(images=images)
         panel.save(path)
+        
+    def save_grid(self, path, grid):
+        strips = [self.make_panel(panel) for panel in grid]
+        
+        W = max(s.width for s in strips)
+        H = sum(s.height for s in strips)
+        
+        grid = Image.new("RGB", (W,H), (0,0,0))
+        
+        y=0
+        
+        for strip in strips:
+            grid.paste(strip, (0, y))
+            y+=strip.height
+        
+        grid.save(path)
+        
+        
+        
 
     def run(self, id_range, cameras, orientation=(0.0, 0.0, 0.0), lighting=False):
         roll, pitch, yaw = orientation
@@ -303,16 +327,21 @@ class ViewRenderer:
                 np.save(out_dir / "landmarks_3d.npy", lm_cam)       # (68,3) camera frame
 
             # all camera overlays side by side, under the id folder (parent of cam dirs)
-            self.save_panel(self.out_root / id / "panel.png", overlays)
+            panel = self.save_panel(self.out_root / id / "panel.png", overlays)
             
             if lighting:
+                grid = []
                 for k in range(1, 5):
+                    row = []
                     light = generate_random_light()
                     for i, cam in enumerate(cams):
                         cam.id = str(i)
                         color, _ = self.render(mesh, cam, light=light)
                         out_dir = self.out_root / id / cam.id
                         Image.fromarray(color).save(out_dir / f"rgb_{k}.png")
+                        row.append(color)
+                    grid.append(row)
+                self.save_grid(path=self.out_root / id / "lighting_panel.png", grid=grid)
 
 
 
@@ -341,11 +370,12 @@ def default_ring(mesh, n=5, radius=300.0, fov_deg=40.0, W=512, H=512,
 
 def generate_random_light() -> Light:
     x = np.random.uniform(-1.0, 1.0)    # left/right: full swing to either cheek
-    y = np.random.uniform(-0.5, 0.5)    # up/down: gentler, avoids harsh top/bottom light
-    z = np.random.uniform(-1.0, -0.3)   # ALWAYS negative -> light comes from the front
+    y = np.random.uniform(-0.75, 0.5)    # up/down: gentler, avoids harsh top/bottom light
+    z = np.random.uniform(-1.0, 0.3)   # ALWAYS negative -> light comes from the front
     
-    intensity = np.random.uniform(4.0, 8.0)
-    return Light(intensity=intensity, direction=(x,y,z))
+    intensity = np.random.uniform(5.0, 10.0)
+    ambient = np.random.uniform(0.2, 0.5)
+    return Light(intensity=intensity, ambient=ambient, direction=(x,y,z))
 
 
 if __name__ == "__main__":
