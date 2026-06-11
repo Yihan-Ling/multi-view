@@ -23,6 +23,14 @@ class Camera:
         self.K = np.asarray(self.K, dtype=float)
         self.R = np.asarray(self.R, dtype=float)
         self.t = np.asarray(self.t, dtype=float)
+        
+@dataclass
+class Light:
+    intensity: float
+    direction: np.ndarray
+    
+    def __post_init__(self):
+        self.direction = np.asarray(self.direction, dtype=float)
 
 
 def look_at_cv(eye, target, up=(0.0, 1.0, 0.0)):   # +Y up in the TU frame
@@ -42,6 +50,28 @@ def intrinsics_from_fov(fov_deg, W, H):
     """Square-pixel K from a horizontal field of view. Handy for test cameras."""
     fx = fy = (W / 2.0) / np.tan(np.radians(fov_deg) / 2.0)
     return np.array([[fx, 0, W / 2.0], [0, fy, H / 2.0], [0, 0, 1.0]])
+
+
+def light_pose_from_direction(direction):
+    """World pose for a pyrender DirectionalLight that travels along `direction`.
+
+    A DirectionalLight emits along the LOCAL -Z axis of its node pose, so we
+    build a pose whose local -Z points the way the light travels. Only the
+    direction matters for a directional light (it has no position), so we pick
+    any stable perpendicular frame; the up-vector swap handles the degenerate
+    case where the light is nearly vertical and `cross(up, z)` would collapse.
+    """
+    d = np.asarray(direction, dtype=float)
+    d = d / np.linalg.norm(d)
+    z = -d                                       # local +Z is opposite the travel dir
+    up = np.array([0.0, 1.0, 0.0])
+    if abs(z @ up) > 0.99:                        # light almost vertical -> new up
+        up = np.array([1.0, 0.0, 0.0])
+    x = np.cross(up, z); x /= np.linalg.norm(x)
+    y = np.cross(z, x)
+    pose = np.eye(4)
+    pose[:3, :3] = np.stack([x, y, z], axis=1)   # columns = light axes in world
+    return pose
 
 
 def rotmat_to_quat(R):
@@ -153,7 +183,7 @@ class ViewRenderer:
         c2w[:3, 3] = -R.T @ t
         return c2w @ np.diag([1.0, -1.0, -1.0, 1.0])
 
-    def render(self, mesh, cam):
+    def render(self, mesh, cam, light: Light = None):
         scene = pyrender.Scene(bg_color=[0, 0, 0, 0], ambient_light=[0.4, 0.4, 0.4])
         scene.add(pyrender.Mesh.from_trimesh(mesh, smooth=False))
         pcam = pyrender.IntrinsicsCamera(fx=cam.K[0, 0], fy=cam.K[1, 1],
@@ -161,7 +191,11 @@ class ViewRenderer:
                                          znear=1.0, zfar=5000.0)
         pose = self._gl_pose(cam.R, cam.t)
         scene.add(pcam, pose=pose)
-        scene.add(pyrender.DirectionalLight(intensity=3.0), pose=pose)
+        
+        if light is None:
+            scene.add(pyrender.DirectionalLight(intensity=3.0), pose=pose)
+        else:
+            scene.add(pyrender.DirectionalLight(intensity=light.intensity), pose=light_pose_from_direction(light.direction))
 
         renderer = pyrender.OffscreenRenderer(cam.W, cam.H)
         color, depth = renderer.render(scene)     # (H,W,3) uint8, (H,W) float32
@@ -220,7 +254,7 @@ class ViewRenderer:
             x += im.width
         panel.save(path)
 
-    def run(self, id_range, cameras, orientation=(0.0, 0.0, 0.0)):
+    def run(self, id_range, cameras, orientation=(0.0, 0.0, 0.0), lighting=False):
         roll, pitch, yaw = orientation
         
         # parse id_range
@@ -270,6 +304,15 @@ class ViewRenderer:
 
             # all camera overlays side by side, under the id folder (parent of cam dirs)
             self.save_panel(self.out_root / id / "panel.png", overlays)
+            
+            if lighting:
+                for k in range(1, 5):
+                    light = generate_random_light()
+                    for i, cam in enumerate(cams):
+                        cam.id = str(i)
+                        color, _ = self.render(mesh, cam, light=light)
+                        out_dir = self.out_root / id / cam.id
+                        Image.fromarray(color).save(out_dir / f"rgb_{k}.png")
 
 
 
@@ -296,6 +339,14 @@ def default_ring(mesh, n=5, radius=300.0, fov_deg=40.0, W=512, H=512,
         cams.append(Camera(id=f"cam{i:02d}", W=W, H=H, K=K, R=R, t=t))
     return cams
 
+def generate_random_light() -> Light:
+    x = np.random.uniform(-1.0, 1.0)    # left/right: full swing to either cheek
+    y = np.random.uniform(-0.5, 0.5)    # up/down: gentler, avoids harsh top/bottom light
+    z = np.random.uniform(-1.0, -0.3)   # ALWAYS negative -> light comes from the front
+    
+    intensity = np.random.uniform(4.0, 8.0)
+    return Light(intensity=intensity, direction=(x,y,z))
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
@@ -303,10 +354,8 @@ if __name__ == "__main__":
     )
     parser.add_argument("--id_range", required=True, help='e.g. "801-805" or "801"')
     parser.add_argument("--cameras", help="path to cameras.json")
-    parser.add_argument("--orientation", type=float, nargs=3, default=(0.0, 0.0, 0.0),
-                        metavar=("ROLL", "PITCH", "YAW"),
-                        help="head orientation in degrees (0 0 0 = front), Tait-Bryan. "
-                             "+yaw=subject's right, +pitch=up, +roll=tilt to subject's right")
+    parser.add_argument("--orientation", type=float, nargs=3, default=(0.0, 0.0, 0.0), metavar=("ROLL", "PITCH", "YAW"))
+    parser.add_argument("--lighting", action="store_true", help="True for random lighting conditions, default false")
     args = parser.parse_args()
     render = ViewRenderer()
-    render.run(args.id_range, args.cameras, args.orientation)
+    render.run(args.id_range, args.cameras, args.orientation, lighting=args.lighting)
