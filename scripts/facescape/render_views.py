@@ -8,7 +8,7 @@ import cv2
 import trimesh
 import pyrender          # run with PYOPENGL_PLATFORM=egl for headless GPU
 from PIL import Image
-
+from tqdm import tqdm
 
 @dataclass
 class Camera:
@@ -288,7 +288,9 @@ class ViewRenderer:
         else:
             ids = [id_range]
         
-        for id in ids:
+        bar = tqdm(ids, desc="rendering")
+        for id in bar:
+            bar.set_postfix_str(id)
             mesh = self.load_mesh(id=id)
             self.orient_head(mesh, roll, pitch, yaw)
             lm_w = mesh.metadata["lm_world"]    # landmark in world frame
