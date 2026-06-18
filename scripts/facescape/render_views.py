@@ -291,6 +291,12 @@ class ViewRenderer:
         bar = tqdm(ids, desc="rendering")
         for id in bar:
             bar.set_postfix_str(id)
+            # some FaceScape subjects (e.g. 832) ship textures but no .obj geometry
+            # in the trainset zip -- skip them instead of crashing the whole run.
+            obj = self.data_root / self.find_id_range_folder(id) / id / "1_neutral.obj"
+            if not obj.is_file():
+                print(f"  warning: no mesh for id {id}, skipping: {obj}")
+                continue
             mesh = self.load_mesh(id=id)
             self.orient_head(mesh, roll, pitch, yaw)
             lm_w = mesh.metadata["lm_world"]    # landmark in world frame
@@ -354,7 +360,7 @@ def load_camera(path):
         for e in entries
     ]
 
-def default_ring(mesh, n=5, radius=300.0, fov_deg=40.0, W=512, H=512,
+def default_ring(mesh, n=5, radius=380.0, fov_deg=40.0, W=512, H=512,
                  az_min_deg=-50.0, az_max_deg=50.0):
     """n look-at cameras spanned evenly in azimuth across [az_min_deg, az_max_deg]
     around the head centroid, centered on the front (az=0). A front-biased arc, not

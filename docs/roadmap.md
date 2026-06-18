@@ -36,12 +36,13 @@ Live project checklist. Update the checkboxes as work progresses. Dates are abso
 Architecture invariant for all models below: **CNN ResNet backbone → transformer
 decoder** (keep this feeding order throughout).
 
-- [x] Extend the renderer to vary **lighting** across the synthetic set. Randomized
-  (seeded) domain randomization: per view, geometry is rendered once and RGB is
-  rendered under `--n_lights` random lighting conditions (1-3 frontal-hemisphere
-  directional lights, random direction/intensity/color-temp + ambient). Output:
-  `rgb__NN.png` per view, lighting spec logged in `meta.json`, `lighting_panel.png`
-  for eyeballing. Camera configs were already variable via `cameras.json`/`default_ring`.
+- [x] Extend the renderer to vary **lighting** across the synthetic set
+  (eyeball-passed 2026-06-12). `--lighting` flag: geometry is rendered once, then RGB
+  is rendered under 4 random frontal-hemisphere directional lights (random
+  direction/intensity + ambient; **not seeded** — reproducibility dropped). Each
+  condition is world-consistent across all cameras. Output: `rgb_1..rgb_4.png`
+  alongside `rgb.png` per view, plus a `lighting_panel.png` grid for eyeballing.
+  Camera configs were already variable via `cameras.json`/`default_ring`.
   - [ ] (Optional refinement) Vary **light color temperature**. Sample a black-body
     temperature in $[3000, 8000]$ K and convert to RGB (Tanner-Helland approximation)
     rather than arbitrary RGB, so the lit side picks up a physical warm/cool tint
@@ -49,9 +50,16 @@ decoder** (keep this feeding order throughout).
     and a `kelvin_to_rgb` helper in `sample_lighting`. Deferred: lights stay white
     until the direction/intensity loop is verified; cheap fallback is global
     white-balance jitter in the torch Dataset.
-- [ ] Train a **known-working model (e.g. RetinaFace)** on the synthetic dataset with the
-  varied lighting/camera configs — a baseline to confirm the data is learnable.
-- [ ] Train on **Great Lakes (HPC)** and evaluate the result to **validate the dataset**.
+- [ ] **HPC dry-run:** run a known-working **RetinaFace** repo on the synthetic data
+  end-to-end on **Great Lakes** — shakes out the HPC env, data loading, multi-GPU,
+  checkpointing, and format compatibility. NOTE: this is a *workflow* validation only;
+  its detection score saturates and does **not** test the landmark/pose GT, so it is
+  not the dataset's scientific validation. (RetinaFace's lasting role = off-the-shelf
+  face cropper, used pretrained, not trained on synthetic.)
+- [ ] **Real dataset validation:** train the **day-1 landmark/pose regressor** (ResNet-50
+  → deconv head for 68 landmarks + MLP head for 6-DoF pose) and report **landmark error
+  (px/mm) + pose error (deg) on a subject-disjoint held-out split**. This exercises the
+  GT we care about and is a direct precursor to MVGFormer.
 - [ ] Adapt **MVGFormer** to do **face detection** (the multi-view path).
 
 ## Modeling & evaluation
