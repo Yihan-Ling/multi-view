@@ -278,9 +278,8 @@ class ViewRenderer:
         
         
 
-    def run(self, id_range, cameras, orientation=(0.0, 0.0, 0.0), lighting=False):
-        roll, pitch, yaw = orientation
-        
+    def run(self, id_range, cameras, orientation=(0.0, 0.0, 0.0), lighting=False,
+            rand_pose=False):
         # parse id_range
         if "-" in id_range:
             l, r = id_range.split("-")
@@ -297,6 +296,7 @@ class ViewRenderer:
             if not obj.is_file():
                 print(f"  warning: no mesh for id {id}, skipping: {obj}")
                 continue
+            roll, pitch, yaw = random_orientation() if rand_pose else orientation
             mesh = self.load_mesh(id=id)
             self.orient_head(mesh, roll, pitch, yaw)
             lm_w = mesh.metadata["lm_world"]    # landmark in world frame
@@ -376,6 +376,17 @@ def default_ring(mesh, n=5, radius=380.0, fov_deg=40.0, W=512, H=512,
         cams.append(Camera(id=f"cam{i:02d}", W=W, H=H, K=K, R=R, t=t))
     return cams
 
+def random_orientation(pitch_max=25.0, yaw_max=35.0):
+    """Random head orientation for --rand_pose. Samples pitch + yaw -- the
+    out-of-plane axes that train-time augmentation CANNOT synthesize (the fixed
+    camera ring renders pitch=0 only and 5 discrete yaws). Roll is left at 0
+    because HRNet's ROT_FACTOR augmentation already covers in-plane roll, and
+    the camera ring's azimuth compounds with this yaw for continuous coverage."""
+    pitch = np.random.uniform(-pitch_max, pitch_max)
+    yaw   = np.random.uniform(-yaw_max, yaw_max)
+    return (0.0, pitch, yaw)
+
+
 def generate_random_light() -> Light:
     x = np.random.uniform(-1.0, 1.0)    # left/right: full swing to either cheek
     y = np.random.uniform(-0.75, 0.5)    # up/down: gentler, avoids harsh top/bottom light
@@ -394,6 +405,8 @@ if __name__ == "__main__":
     parser.add_argument("--cameras", help="path to cameras.json")
     parser.add_argument("--orientation", type=float, nargs=3, default=(0.0, 0.0, 0.0), metavar=("ROLL", "PITCH", "YAW"))
     parser.add_argument("--lighting", action="store_true", help="True for random lighting conditions, default false")
+    parser.add_argument("--rand_pose", action="store_true", help="randomize head pitch+yaw per subject (overrides --orientation)")
     args = parser.parse_args()
     render = ViewRenderer()
-    render.run(args.id_range, args.cameras, args.orientation, lighting=args.lighting)
+    render.run(args.id_range, args.cameras, args.orientation, lighting=args.lighting,
+               rand_pose=args.rand_pose)

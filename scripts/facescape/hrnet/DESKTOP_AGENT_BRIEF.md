@@ -30,7 +30,13 @@ training recipe (epochs, LR schedule) needs adjusting -- then iterate.
 - The **data adapter** (`scripts/facescape/build_hrnet_landmark_dataset.py`) converts
   rendered FaceScape views into HRNet's 300W CSV format. Already run on the laptop; its
   output (`data/facescape/HRNet_train/{train.csv,val.csv,images/}`) arrives on USB.
-  ~146 subjects, **2925 train images / 725 val images**, split subject-disjoint.
+  **246 subjects, 4925 train images / 1225 val images** (197 / 49 subjects, verified
+  subject-disjoint with zero overlap). All images are 512x512.
+- **Randomized backgrounds (the sim-to-real lever):** ~80% of images have a real indoor
+  photo (MIT Indoor67) composited behind the head; ~20% keep the clean render background.
+  The head matte comes from the render's depth mask (hard silhouette edge), and the 68
+  landmarks are unchanged by compositing -- labels stay exact. **Seeing busy indoor
+  scenes behind the faces is expected, not data corruption.**
 - A **smoke test passed on the laptop**: 1 epoch, data loads, loss drops, checkpoint
   saves. So the code path is known-good; you are not debugging plumbing, you are training.
 - The training **config** and a required **crop patch** are in this folder (see below).
@@ -132,9 +138,13 @@ run (if any). Do not silently launch many long runs -- propose the change first.
   `get_transform` matrix the landmark targets use**. `crop_v2` uses a different affine
   and would misalign images vs labels -- training would "work" but learn garbage.
 - **Do not commit `output/` or `log/`** (already gitignored).
-- **Known data caveat:** ~76% of views have the chin tip clipped by the renderer; those
-  off-image points are marked invalid (sentinel, skipped in the loss). Expect weaker
-  lower-jaw accuracy -- this is a known limitation, not a bug to chase.
+- **Landmark validity:** this 246-subject set was verified against the shipped CSVs to
+  have **all 68 landmarks in-frame** (no invalid/-1 sentinels, no NaNs) -- the chin-clip
+  caveat from the earlier 146-subject data no longer applies here.
+- **Pose distribution:** these renders use the fixed camera ring (yaw in [-50,50] deg,
+  pitch ~0), so the training poses are near-frontal. The `--rand_pose` render variation
+  is NOT in this dataset. Real test sets (AFLW2000/WFLW) span larger pitch/yaw, so expect
+  a pose-driven gap on the real eval -- a known limitation of this data, not a bug.
 - **Do not change the adapter or re-render** here. The dataset is fixed input for this
   step; data changes happen on the laptop.
 
