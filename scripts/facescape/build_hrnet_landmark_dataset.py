@@ -7,6 +7,7 @@ from math import floor
 import shutil
 import pandas as pd
 from PIL import Image
+from scipy.ndimage import binary_fill_holes
 
 
 @dataclass
@@ -122,15 +123,27 @@ def _fit_bg(bg: np.ndarray, H: int, W: int, rng) -> np.ndarray:
 
 
 def composite_over_bg(rgb: np.ndarray, depth: np.ndarray, bg: np.ndarray,
-                      rng) -> np.ndarray:
+                      rng, fill_holes_black: bool = True) -> np.ndarray:
     H, W = rgb.shape[:2]
-    mask = depth > 0
+    mask = depth > 0                                   # rendered face surface
     bg = _fit_bg(bg, H, W, rng).astype(np.uint8)
-    return np.where(mask[..., None], rgb, bg).astype(np.uint8)
+    out = np.where(mask[..., None], rgb, bg).astype(np.uint8)
+    if fill_holes_black:
+        # The TU mesh has no eyeballs, so the eye region is a depth==0 HOLE.
+        # Without this, the depth>0 matte treats those holes as "not face" and
+        # the random background leaks THROUGH the eyes. binary_fill_holes gives
+        # the solid head silhouette; depth==0 pixels enclosed by it are interior
+        # holes (eyes, nostrils) -> paint them black instead of background, so the
+        # eyes stay a consistent dark region under any background.
+        solid = binary_fill_holes(mask)
+        interior_holes = solid & ~mask
+        out[interior_holes] = 0
+    return out
 
 
 def build_csv(views: list[View], train_type, out_root: Path,
-              bg_paths: list[Path], rng: np.random.Generator, composite_prob = 0.8):
+              bg_paths: list[Path], rng: np.random.Generator, composite_prob = 0.8,
+              fill_holes_black: bool = True):
     images_dir = out_root / "images"
     images_dir.mkdir(parents=True, exist_ok=True)
 
@@ -139,14 +152,15 @@ def build_csv(views: list[View], train_type, out_root: Path,
         relpath, scale, center_w, center_h, flat_pts = view2row(v)
         out_path = images_dir / relpath
 
-        
+
         if rng.random() < composite_prob:
             rgb = np.asarray(Image.open(v.rgb_path).convert("RGB"))
             depth = np.load(v.rgb_path.parent / "depth.npy")
             background = np.asarray(Image.open(bg_paths[rng.integers(len(bg_paths))]).convert("RGB"))
-            
-            Image.fromarray(composite_over_bg(rgb, depth, background, rng)).save(out_path)
-        
+
+            Image.fromarray(composite_over_bg(rgb, depth, background, rng,
+                                              fill_holes_black=fill_holes_black)).save(out_path)
+
         else:
             shutil.copy(v.rgb_path, out_path)
 
@@ -160,19 +174,47 @@ def build_csv(views: list[View], train_type, out_root: Path,
 
 
 def main(data_root, out_root,
-         bg_root="data/backgrounds/indoor/Images", seed=0, composite_prob=0.8):
-    
+         bg_root="data/backgrounds/indoor/Images", seed=0, composite_prob=0.8,
+         fill_holes_black=True):
+
     rng = np.random.default_rng(seed)
-    
+
     data_root = Path(data_root)
     out_root  = Path(out_root)
     views = discover_views(data_root)
     split = split_val(views, rng=rng)
-    
-    bg_paths = load_background_paths(Path(bg_root))
+
+    # Skip loading the background pool when compositing is disabled, so a
+    # photometric-only build doesn't require the Indoor67 dir to be present.
+    bg_paths = load_background_paths(Path(bg_root)) if composite_prob > 0 else []
     for n in ("train", "val"):
-        build_csv(split[n], n, out_root, bg_paths, rng, composite_prob)
+        build_csv(split[n], n, out_root, bg_paths, rng, composite_prob, fill_holes_black)
+
+
+def parse_args():
+    import argparse
+    p = argparse.ArgumentParser(
+        description="Build the HRNet 68-pt landmark bundle from FaceScape virtual-camera renders.")
+    p.add_argument("--data-root", default="data/facescape/virtual_camera_data",
+                   help="Root of the virtual-camera renders.")
+    p.add_argument("--out-root", default="data/facescape/HRNet_train_nobg",
+                   help="Output bundle dir (images/ + train.csv/val.csv).")
+    p.add_argument("--bg-root", default="data/backgrounds/indoor/Images",
+                   help="Background pool (ignored when --composite-prob is 0).")
+    p.add_argument("--composite-prob", type=float, default=0.0,
+                   help="Per-view probability of compositing a random background "
+                        "(0 = clean renders / no background aug).")
+    p.add_argument("--fill-holes", action="store_true", default=True,
+                   help="Paint interior depth==0 holes (eyes) black instead of "
+                        "letting the background leak through them (default on).")
+    p.add_argument("--no-fill-holes", dest="fill_holes", action="store_false",
+                   help="Disable hole filling; background leaks through the eye holes.")
+    p.add_argument("--seed", type=int, default=0)
+    return p.parse_args()
 
 
 if __name__ == "__main__":
-    main("data/facescape/virtual_camera_data", "data/facescape/HRNet_train")
+    args = parse_args()
+    main(args.data_root, args.out_root,
+         bg_root=args.bg_root, seed=args.seed, composite_prob=args.composite_prob,
+         fill_holes_black=args.fill_holes)

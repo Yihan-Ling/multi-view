@@ -38,12 +38,12 @@ N_SAMPLES = 6  # 2x3 panel
 
 # (tag, human title, checkpoint) -- title is what the user asked for
 MODELS = [
-    ("sharp", "No background augmentation",
-     "output/hrnet/sharp_trained/model_best.pth"),
-    ("forte", "Background augmentation",
-     "output/hrnet/forte_trained/300W/face_alignment_facescape_w18/model_best.pth"),
-    ("photo_aug", "Photometric augmentation",
+    ("photo_aug", "Photometric + bg (eye-leak bug)  [real NME 0.1462]",
      "output/hrnet/photo_aug/model_best.pth"),
+    ("eyeblack_bg", "Photometric + bg + black eyes  [real NME 0.1964]",
+     "output/hrnet/iter3_eyeblack_bg/model_best.pth"),
+    ("nobg", "Photometric only, no bg  [real NME 0.2325]",
+     "output/hrnet/iter2_nobg/model_best.pth"),
 ]
 
 

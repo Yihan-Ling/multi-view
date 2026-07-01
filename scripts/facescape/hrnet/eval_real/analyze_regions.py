@@ -79,6 +79,16 @@ def main():
         idx = list(idx)
         print(f"{name:12s} {per_point[idx].mean():8.4f}  {len(idx):>4d}")
 
+    # Aggregates that drop the hardest regions, so the headline number isn't
+    # dominated by the contour (which the synthetic cap/no-hair renders never
+    # taught and which the benchmarks define ambiguously). These average the same
+    # per-point normalized error over a SUBSET of points.
+    inner = list(range(17, 68))            # all but jaw/contour (51 pts)
+    core = list(range(27, 68))             # nose+eyes+mouth only (41 pts)
+    print()
+    print(f"{'inner-51':12s} {per_point[inner].mean():8.4f}  {len(inner):>4d}  (no jaw/contour)")
+    print(f"{'core-41':12s} {per_point[core].mean():8.4f}  {len(core):>4d}  (no contour/brows)")
+
 
 if __name__ == "__main__":
     main()
