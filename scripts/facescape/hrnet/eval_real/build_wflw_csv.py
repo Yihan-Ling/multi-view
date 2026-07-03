@@ -55,14 +55,21 @@ Get the files from https://wywu.github.io/projects/LAB/WFLW.html (ungated):
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from PIL import Image
 
 # Reuse the AFLW builder's framing + writer so parity has a SINGLE source of truth.
 # (Both files live in this dir; running this script directly puts it on sys.path.)
 from build_aflw2000_csv import bbox_to_center_scale, write_csv
+
+# Shared RetinaFace crop helper lives at scripts/facescape/ (two dirs up).
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from face_detector_crop import detect_main_box  # noqa: E402
+from face_detector_crop import box_to_center_scale as det_box_to_center_scale  # noqa: E402
 
 
 # --- Canonical WFLW-98 -> iBUG-68 index map ----------------------------------
@@ -93,9 +100,12 @@ def parse_line(line: str) -> tuple[np.ndarray, int, str]:
     return pts68, large_pose, rel_path
 
 
-def build_rows(anno_file: Path, img_root: Path, drop_large_pose: bool) -> list[list]:
+def build_rows(anno_file: Path, img_root: Path, drop_large_pose: bool,
+               crop_mode: str = "landmark", det_gpu_id: int = -1,
+               det_network: str = "mobilenet") -> list[list]:
     rows: list[list] = []
     kept = skipped = 0
+    n_fallback = 0
     for line in anno_file.read_text().splitlines():
         line = line.strip()
         if not line:
@@ -107,10 +117,24 @@ def build_rows(anno_file: Path, img_root: Path, drop_large_pose: bool) -> list[l
         if not (img_root / rel_path).exists():
             skipped += 1
             continue
-        # VERIFY #1: jaw-excluded framing, IGNORING WFLW's own rect (parity w/ training).
-        scale, cw, ch = bbox_to_center_scale(pts, exclude_jaw=True)
+        # VERIFY #1: framing MUST match the model's training crop. landmark =
+        # jaw-excluded bbox (ignores WFLW's own rect); retinaface = detector box
+        # on the real image (parity with a retinaface-cropped model).
+        if crop_mode == "retinaface":
+            img = np.asarray(Image.open(img_root / rel_path).convert("RGB"))
+            box = detect_main_box(img, gpu_id=det_gpu_id, network=det_network)
+            if box is not None:
+                scale, cw, ch = det_box_to_center_scale(box)
+            else:
+                scale, cw, ch = bbox_to_center_scale(pts, exclude_jaw=True)
+                n_fallback += 1
+        else:
+            scale, cw, ch = bbox_to_center_scale(pts, exclude_jaw=True)
         rows.append([rel_path, scale, cw, ch, *pts.flatten().tolist()])
         kept += 1
+    if crop_mode == "retinaface":
+        print(f"retinaface: {n_fallback}/{kept} images had no detection -> "
+              f"fell back to landmark bbox")
     print(f"kept {kept} / skipped {skipped} (drop_large_pose={drop_large_pose})")
     return rows
 
@@ -130,9 +154,18 @@ def main() -> None:
                     help="drop WFLW large-pose images (attr[0]==1) to roughly match the "
                          "synthetic frontal-ish ring, like AFLW's yaw<=45 filter; off by "
                          "default so the number matches the standard full-set WFLW benchmark")
+    ap.add_argument("--crop-mode", choices=["landmark", "retinaface"], default="landmark",
+                    help="Framing source. MUST match the model's training crop: use "
+                         "'retinaface' to evaluate a model trained with "
+                         "build_hrnet_landmark_dataset.py --crop-mode retinaface.")
+    ap.add_argument("--det-gpu", type=int, default=-1,
+                    help="GPU id for RetinaFace (-1 = CPU); only with --crop-mode retinaface")
+    ap.add_argument("--det-network", choices=["mobilenet", "resnet50"], default="mobilenet")
     args = ap.parse_args()
 
-    rows = build_rows(args.anno, args.img_root, args.drop_large_pose)
+    rows = build_rows(args.anno, args.img_root, args.drop_large_pose,
+                      crop_mode=args.crop_mode, det_gpu_id=args.det_gpu,
+                      det_network=args.det_network)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     write_csv(rows, args.out)
     print(f"wrote {len(rows)} rows -> {args.out}")

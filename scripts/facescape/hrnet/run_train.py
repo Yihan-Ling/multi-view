@@ -38,5 +38,47 @@ _train = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_train)
 _train.get_dataset = lambda cfg: FaceScapeAug  # belt-and-suspenders override
 
+# 3) Thin the per-epoch checkpointing WITHOUT editing vendored code. Stock
+#    tools/train.py calls utils.save_checkpoint() every epoch, which writes a
+#    full checkpoint_{epoch}.pth each time (60 large files for a 60-ep run). We
+#    replace utils.save_checkpoint (train.py looks it up as an attribute on the
+#    module at call time, so patching the module attribute takes effect) with a
+#    policy that keeps latest.pth + model_best.pth EVERY epoch (resume works, no
+#    best is ever missed) but only keeps the numbered archive every SAVE_EVERY.
+import os                                        # noqa: E402
+import torch                                     # noqa: E402
+from lib.utils import utils as _utils            # noqa: E402
+
+SAVE_EVERY = 5  # keep checkpoint_{epoch}.pth only when (epoch+1) % SAVE_EVERY == 0
+
+
+def _save_checkpoint_every_n(states, predictions, is_best, output_dir,
+                             filename="checkpoint.pth"):
+    # current predictions: rolling, every epoch (unchanged from upstream)
+    torch.save(predictions.cpu().data.numpy(),
+               os.path.join(output_dir, "current_pred.pth"))
+
+    # latest.pth as a REAL file (overwritten every epoch), so RESUME works even on
+    # epochs where we skip the numbered archive. Upstream made it a symlink to the
+    # numbered file, which would dangle on skipped epochs -- a real file is safe.
+    latest_path = os.path.join(output_dir, "latest.pth")
+    if os.path.islink(latest_path) or os.path.exists(latest_path):
+        os.remove(latest_path)
+    torch.save(states, latest_path)
+
+    # best model: every epoch it improves (unchanged from upstream)
+    if is_best and "state_dict" in states:
+        torch.save(states["state_dict"].module,
+                   os.path.join(output_dir, "model_best.pth"))
+
+    # numbered archive: only every SAVE_EVERY completed epochs. states["epoch"] is
+    # epoch+1, so this saves at epoch indices 4,9,...,59 for a 60-epoch run (and the
+    # final epoch, since 60 % 5 == 0). final_state.pth is still saved after the loop.
+    if states.get("epoch", 0) % SAVE_EVERY == 0:
+        torch.save(states, os.path.join(output_dir, filename))
+
+
+_utils.save_checkpoint = _save_checkpoint_every_n
+
 if __name__ == "__main__":
     _train.main()  # consumes --cfg from sys.argv

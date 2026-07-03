@@ -54,11 +54,18 @@ from __future__ import annotations
 
 import argparse
 import math
+import sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from PIL import Image
 import scipy.io  # noqa: F401  (needed once you write load_landmarks_and_yaw)
+
+# Shared RetinaFace crop helper lives at scripts/facescape/ (two dirs up).
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from face_detector_crop import detect_main_box  # noqa: E402
+from face_detector_crop import box_to_center_scale as det_box_to_center_scale  # noqa: E402
 
 
 # --- Framing constants: COPIED from build_hrnet_landmark_dataset.py:view2row ---
@@ -94,9 +101,12 @@ def load_landmarks_and_yaw(mat_path: Path) -> tuple[np.ndarray, float]:
     return pts, yaw_deg
 
 
-def build_rows(aflw_dir: Path, yaw_max: float, exclude_jaw: bool = False) -> list[list]:
+def build_rows(aflw_dir: Path, yaw_max: float, exclude_jaw: bool = False,
+               crop_mode: str = "landmark", det_gpu_id: int = -1,
+               det_network: str = "mobilenet") -> list[list]:
     rows: list[list] = []
     kept = skipped = 0
+    n_fallback = 0
     for mat_path in sorted(aflw_dir.glob("*.mat")):
         pts, yaw_deg = load_landmarks_and_yaw(mat_path)
         if abs(yaw_deg) > yaw_max:
@@ -106,9 +116,24 @@ def build_rows(aflw_dir: Path, yaw_max: float, exclude_jaw: bool = False) -> lis
         if not jpg.exists():
             skipped += 1
             continue
-        scale, cw, ch = bbox_to_center_scale(pts, exclude_jaw=exclude_jaw)
+        # Framing must match how the model was trained (see VERIFY #1): a
+        # landmark-cropped model needs landmark framing; a retinaface-cropped
+        # model needs detector framing on the real image.
+        if crop_mode == "retinaface":
+            img = np.asarray(Image.open(jpg).convert("RGB"))
+            box = detect_main_box(img, gpu_id=det_gpu_id, network=det_network)
+            if box is not None:
+                scale, cw, ch = det_box_to_center_scale(box)
+            else:
+                scale, cw, ch = bbox_to_center_scale(pts, exclude_jaw=exclude_jaw)
+                n_fallback += 1
+        else:
+            scale, cw, ch = bbox_to_center_scale(pts, exclude_jaw=exclude_jaw)
         rows.append([jpg.name, scale, cw, ch, *pts.flatten().tolist()])
         kept+=1
+    if crop_mode == "retinaface":
+        print(f"retinaface: {n_fallback}/{kept} images had no detection -> "
+              f"fell back to landmark bbox")
     print(f"kept {kept} / skipped {skipped} (yaw_max={yaw_max})")
     return rows
 
@@ -133,9 +158,18 @@ def main() -> None:
     ap.add_argument("--include_jaw", action="store_true",
                     help="use the OLD all-68 bbox framing (jaw included); off by default "
                          "because it under-frames real faces vs training")
+    ap.add_argument("--crop-mode", choices=["landmark", "retinaface"], default="landmark",
+                    help="Framing source. MUST match the model's training crop: use "
+                         "'retinaface' to evaluate a model trained with "
+                         "build_hrnet_landmark_dataset.py --crop-mode retinaface.")
+    ap.add_argument("--det-gpu", type=int, default=-1,
+                    help="GPU id for RetinaFace (-1 = CPU); only with --crop-mode retinaface")
+    ap.add_argument("--det-network", choices=["mobilenet", "resnet50"], default="mobilenet")
     args = ap.parse_args()
 
-    rows = build_rows(args.aflw_dir, args.yaw_max, exclude_jaw=not args.include_jaw)
+    rows = build_rows(args.aflw_dir, args.yaw_max, exclude_jaw=not args.include_jaw,
+                      crop_mode=args.crop_mode, det_gpu_id=args.det_gpu,
+                      det_network=args.det_network)
     write_csv(rows, args.out)
     print(f"wrote {len(rows)} rows -> {args.out}")
 

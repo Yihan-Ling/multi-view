@@ -1,0 +1,99 @@
+# HRNetV2-W18 on FaceScape synthetic -- FROM SCRATCH + photometric aug + background
+# aug + EYE-LEAK + RETINAFACE CROP. This is the best-performing photo_aug recipe
+# (photometric + bg + bg-leak-through-eyes) with ONE new variable: the crop framing
+# comes from a RetinaFace detector box instead of the GT-landmark bbox, applied
+# IDENTICALLY here and in both real-eval converters (--crop-mode retinaface) so
+# train and test share the same detector-derived framing.
+#
+# Bundle built with:
+#   build_hrnet_landmark_dataset.py --out-root data/facescape/HRNet_train_retina_eyeleak_bg \
+#     --composite-prob 0.8 --no-fill-holes --crop-mode retinaface --det-gpu 0
+#   (--no-fill-holes => background leaks through the eye holes = the photo_aug eye
+#    behavior that beat flat-black eyes; --crop-mode retinaface => detector framing.)
+# Photometric aug is added live by run_train.py / FaceScapeAug at train time.
+# Distinct cfg filename => distinct output dir
+# (output/.../face_alignment_facescape_w18_scratch_retina), never overwrites the
+# other conditions. Run from the MAIN repo root (paths are relative to it).
+GPUS: (0,)
+WORKERS: 8
+PRINT_FREQ: 50
+OUTPUT_DIR: 'output'
+LOG_DIR: 'log'
+
+DATASET:
+  DATASET: 300W
+  ROOT: './data/facescape/HRNet_train_retina_eyeleak_bg/images'
+  TRAINSET: './data/facescape/HRNet_train_retina_eyeleak_bg/train.csv'
+  TESTSET: './data/facescape/HRNet_train_retina_eyeleak_bg/val.csv'
+  FLIP: true
+  SCALE_FACTOR: 0.25
+  ROT_FACTOR: 30
+MODEL:
+  NAME: 'hrnet'
+  NUM_JOINTS: 68
+  INIT_WEIGHTS: true
+  PRETRAINED: ''          # <-- FROM SCRATCH (no ImageNet warm start)
+  SIGMA: 1.0
+  IMAGE_SIZE:
+    - 256
+    - 256
+  HEATMAP_SIZE:
+    - 64
+    - 64
+  EXTRA:
+    FINAL_CONV_KERNEL: 1
+    STAGE2:
+      NUM_MODULES: 1
+      NUM_BRANCHES: 2
+      BLOCK: BASIC
+      NUM_BLOCKS:
+        - 4
+        - 4
+      NUM_CHANNELS:
+        - 18
+        - 36
+      FUSE_METHOD: SUM
+    STAGE3:
+      NUM_MODULES: 4
+      NUM_BRANCHES: 3
+      BLOCK: BASIC
+      NUM_BLOCKS:
+        - 4
+        - 4
+        - 4
+      NUM_CHANNELS:
+        - 18
+        - 36
+        - 72
+      FUSE_METHOD: SUM
+    STAGE4:
+      NUM_MODULES: 3
+      NUM_BRANCHES: 4
+      BLOCK: BASIC
+      NUM_BLOCKS:
+        - 4
+        - 4
+        - 4
+        - 4
+      NUM_CHANNELS:
+        - 18
+        - 36
+        - 72
+        - 144
+      FUSE_METHOD: SUM
+TRAIN:
+  # Same proven forte recipe (from-scratch, BS64, 60 ep, LR_STEP [30,50]) as the
+  # other scratch runs, so this is a clean A/B: only the crop framing differs.
+  BATCH_SIZE_PER_GPU: 64
+  SHUFFLE: true
+  BEGIN_EPOCH: 0
+  END_EPOCH: 60
+  RESUME: false
+  OPTIMIZER: 'adam'
+  LR: 0.0001
+  WD: 0.0
+  LR_STEP: [30, 50]
+  MOMENTUM: 0.0
+  NESTEROV: false
+TEST:
+  BATCH_SIZE_PER_GPU: 256

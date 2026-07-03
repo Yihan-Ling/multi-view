@@ -1,5 +1,6 @@
 import numpy as np
 import warnings
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 import random
@@ -8,6 +9,10 @@ import shutil
 import pandas as pd
 from PIL import Image
 from scipy.ndimage import binary_fill_holes
+
+# Shared RetinaFace crop helper lives next to this script (scripts/facescape/).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from face_detector_crop import detect_main_box, box_to_center_scale  # noqa: E402
 
 
 @dataclass
@@ -143,39 +148,59 @@ def composite_over_bg(rgb: np.ndarray, depth: np.ndarray, bg: np.ndarray,
 
 def build_csv(views: list[View], train_type, out_root: Path,
               bg_paths: list[Path], rng: np.random.Generator, composite_prob = 0.8,
-              fill_holes_black: bool = True):
+              fill_holes_black: bool = True, crop_mode: str = "landmark",
+              det_gpu_id: int = -1, det_network: str = "mobilenet"):
     images_dir = out_root / "images"
     images_dir.mkdir(parents=True, exist_ok=True)
 
     rows = []
+    n_fallback = 0
     for v in views:
-        relpath, scale, center_w, center_h, flat_pts = view2row(v)
+        relpath, lm_scale, lm_cw, lm_ch, flat_pts = view2row(v)
         out_path = images_dir / relpath
 
-
+        # Produce the FINAL on-disk image; `img` (RGB array) is kept when the
+        # detector needs to run on those exact pixels (retinaface crop mode).
         if rng.random() < composite_prob:
             rgb = np.asarray(Image.open(v.rgb_path).convert("RGB"))
             depth = np.load(v.rgb_path.parent / "depth.npy")
             background = np.asarray(Image.open(bg_paths[rng.integers(len(bg_paths))]).convert("RGB"))
-
-            Image.fromarray(composite_over_bg(rgb, depth, background, rng,
-                                              fill_holes_black=fill_holes_black)).save(out_path)
-
+            img = composite_over_bg(rgb, depth, background, rng,
+                                    fill_holes_black=fill_holes_black)
+            Image.fromarray(img).save(out_path)
         else:
             shutil.copy(v.rgb_path, out_path)
+            img = None
 
-        row= [relpath, scale, center_w, center_h, *flat_pts]
-        rows.append(row)
-        
+        # Framing: detector box (parity with real deployment) or landmark bbox.
+        if crop_mode == "retinaface":
+            if img is None:
+                img = np.asarray(Image.open(out_path).convert("RGB"))
+            box = detect_main_box(img, gpu_id=det_gpu_id, network=det_network)
+            if box is not None:
+                scale, center_w, center_h = box_to_center_scale(box)
+            else:                                   # no face detected -> fall back
+                scale, center_w, center_h = lm_scale, lm_cw, lm_ch
+                n_fallback += 1
+        else:
+            scale, center_w, center_h = lm_scale, lm_cw, lm_ch
+
+        rows.append([relpath, scale, center_w, center_h, *flat_pts])
+
+    if crop_mode == "retinaface":
+        print(f"[{train_type}] retinaface: {n_fallback}/{len(views)} views had no "
+              f"detection -> fell back to landmark bbox")
+
     cols = ["image", "scale", "center_w", "center_h"] + [f"p{i}" for i in range(136)]
-    
+
     df = pd.DataFrame(rows, columns=cols)
     df.to_csv(out_root/f"{train_type}.csv", index=False)
 
 
 def main(data_root, out_root,
          bg_root="data/backgrounds/indoor/Images", seed=0, composite_prob=0.8,
-         fill_holes_black=True):
+         fill_holes_black=True, crop_mode="landmark", det_gpu_id=-1,
+         det_network="mobilenet"):
 
     rng = np.random.default_rng(seed)
 
@@ -188,7 +213,9 @@ def main(data_root, out_root,
     # photometric-only build doesn't require the Indoor67 dir to be present.
     bg_paths = load_background_paths(Path(bg_root)) if composite_prob > 0 else []
     for n in ("train", "val"):
-        build_csv(split[n], n, out_root, bg_paths, rng, composite_prob, fill_holes_black)
+        build_csv(split[n], n, out_root, bg_paths, rng, composite_prob,
+                  fill_holes_black, crop_mode=crop_mode, det_gpu_id=det_gpu_id,
+                  det_network=det_network)
 
 
 def parse_args():
@@ -209,6 +236,15 @@ def parse_args():
                         "letting the background leak through them (default on).")
     p.add_argument("--no-fill-holes", dest="fill_holes", action="store_false",
                    help="Disable hole filling; background leaks through the eye holes.")
+    p.add_argument("--crop-mode", choices=["landmark", "retinaface"], default="landmark",
+                   help="Framing source: 'landmark' = GT-landmark bbox (old default); "
+                        "'retinaface' = RetinaFace detection box (must match the eval "
+                        "converters' --crop-mode for train/test parity).")
+    p.add_argument("--det-gpu", type=int, default=-1,
+                   help="GPU id for the RetinaFace detector (-1 = CPU). Only used with "
+                        "--crop-mode retinaface.")
+    p.add_argument("--det-network", choices=["mobilenet", "resnet50"], default="mobilenet",
+                   help="RetinaFace backbone for detection (mobilenet = fast/small).")
     p.add_argument("--seed", type=int, default=0)
     return p.parse_args()
 
@@ -217,4 +253,5 @@ if __name__ == "__main__":
     args = parse_args()
     main(args.data_root, args.out_root,
          bg_root=args.bg_root, seed=args.seed, composite_prob=args.composite_prob,
-         fill_holes_black=args.fill_holes)
+         fill_holes_black=args.fill_holes, crop_mode=args.crop_mode,
+         det_gpu_id=args.det_gpu, det_network=args.det_network)

@@ -1,0 +1,97 @@
+# Real-image EVAL config: run a FaceScape-trained HRNetV2-W18 on AFLW2000-3D.
+# This is a sim-to-real test, not training. tools/test.py forces INIT_WEIGHTS=False
+# and loads the checkpoint from --model-file, so the PRETRAINED path below is ignored.
+#
+# Reuses the Face300W loader (DATASET: 300W) because build_aflw2000_csv.py emits the
+# exact 300W CSV format and AFLW2000-3D is natively iBUG-68 -> compute_nme() uses the
+# 68-pt inter-ocular norm (||pts[36]-pts[45]||). Paths are relative to the MAIN repo root.
+#
+# Run from repo root, e.g.:
+#   PYTHONPATH=third_party/HRNet-Facial-Landmark-Detection \
+#   .venv/bin/python third_party/HRNet-Facial-Landmark-Detection/tools/test.py \
+#     --cfg scripts/facescape/hrnet/eval_real/face_alignment_aflw2000_w18.yaml \
+#     --model-file output/hrnet/forte_trained/300W/face_alignment_facescape_w18/model_best.pth
+GPUS: (0,)
+WORKERS: 4
+PRINT_FREQ: 50
+OUTPUT_DIR: 'output'
+LOG_DIR: 'log'
+
+DATASET:
+  DATASET: 300W
+  ROOT: './data/AFLW2000'
+  # RETINAFACE-cropped CSV -- pairs with a model trained on retinaface crops.
+  # Build: build_aflw2000_csv.py --crop-mode retinaface --out data/AFLW2000/test_yaw45_retina.csv
+  # TRAINSET unused at test time but the config schema expects the key.
+  TRAINSET: './data/AFLW2000/test_yaw45_retina.csv'
+  TESTSET: './data/AFLW2000/test_yaw45_retina.csv'
+  FLIP: false
+  SCALE_FACTOR: 0.25
+  ROT_FACTOR: 30
+MODEL:
+  NAME: 'hrnet'
+  NUM_JOINTS: 68
+  INIT_WEIGHTS: false
+  PRETRAINED: ''
+  SIGMA: 1.0
+  IMAGE_SIZE:
+    - 256
+    - 256
+  HEATMAP_SIZE:
+    - 64
+    - 64
+  EXTRA:
+    FINAL_CONV_KERNEL: 1
+    STAGE2:
+      NUM_MODULES: 1
+      NUM_BRANCHES: 2
+      BLOCK: BASIC
+      NUM_BLOCKS:
+        - 4
+        - 4
+      NUM_CHANNELS:
+        - 18
+        - 36
+      FUSE_METHOD: SUM
+    STAGE3:
+      NUM_MODULES: 4
+      NUM_BRANCHES: 3
+      BLOCK: BASIC
+      NUM_BLOCKS:
+        - 4
+        - 4
+        - 4
+      NUM_CHANNELS:
+        - 18
+        - 36
+        - 72
+      FUSE_METHOD: SUM
+    STAGE4:
+      NUM_MODULES: 3
+      NUM_BRANCHES: 4
+      BLOCK: BASIC
+      NUM_BLOCKS:
+        - 4
+        - 4
+        - 4
+        - 4
+      NUM_CHANNELS:
+        - 18
+        - 36
+        - 72
+        - 144
+      FUSE_METHOD: SUM
+TRAIN:
+  BATCH_SIZE_PER_GPU: 16
+  SHUFFLE: false
+  BEGIN_EPOCH: 0
+  END_EPOCH: 60
+  RESUME: false
+  OPTIMIZER: 'adam'
+  LR: 0.0001
+  WD: 0.0
+  LR_STEP: [30, 50]
+  MOMENTUM: 0.0
+  NESTEROV: false
+TEST:
+  BATCH_SIZE_PER_GPU: 16
