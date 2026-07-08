@@ -70,3 +70,43 @@ class RGBDPoseResNet50(nn.Module):
         x = self.layer4(x)
         x = self.deconv_head(x)
         return x
+
+
+class MultiViewBackbone(nn.Module):
+    """Phase 3 - run the shared RGBD backbone over all N views of each sample.
+
+        input   rgbd   (B, N, 4, H, W)     B samples, N views each
+        output  feats  (B, N, C, H/4, W/4)  C = backbone.out_channels (256)
+
+    The backbone is view-agnostic: the SAME weights process every view. So
+    instead of looping over views, we fold the N-view axis into the batch
+    dimension, do one backbone pass, then unfold. The only thing to get right is
+    the bookkeeping -- the unfold must restore (B, N, ...) in the same order the
+    fold flattened them.
+    """
+
+    def __init__(self, pretrained: bool = False, deconv_channels: int = 256) -> None:
+        # from-scratch path: pretrained=False -> all 4 conv1 channels random-init
+        # (we do NOT call init_conv1_4ch_from_pretrained here).
+        super().__init__()
+        self.backbone = RGBDPoseResNet50(
+            deconv_channels=deconv_channels, pretrained=pretrained
+        )
+        self.out_channels = self.backbone.out_channels
+
+    def forward(self, rgbd: torch.Tensor) -> torch.Tensor:
+        B, N, C, H, W = rgbd.shape
+
+        # BLANK 1: fold the N view axis into the batch dim so one backbone pass
+        # handles all views. Target shape (B*N, C, H, W).
+        # Hint: reshape/view is row-major -> B is the OUTER index, N the INNER, so
+        # element (b, n) lands at row b*N + n. Keep that order for the unfold.
+        x = rgbd.reshape(B*N, C, H, W)
+
+        feats = self.backbone(x)
+
+        # BLANK 2: unfold the batch dim back to (B, N, out_channels, H/4, W/4).
+        # Use feats' own spatial size (H/4, W/4), not H, W.
+        feats = feats.reshape(B, N, self.out_channels, feats.shape[-2], feats.shape[-1])
+
+        return feats

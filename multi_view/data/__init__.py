@@ -6,6 +6,6 @@ numpy, while mesh/render helpers import trimesh lazily so this package can also 
 imported from the torch training env (which does not have the render stack).
 """
 
-from multi_view.data import facescape
+from multi_view.data import facescape_reader
 
-__all__ = ["facescape"]
+__all__ = ["facescape_reader"]
