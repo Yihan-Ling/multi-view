@@ -35,6 +35,8 @@ def parse_args():
     p.add_argument("--epochs", type=int, default=40)
     p.add_argument("--bs", type=int, default=2)
     p.add_argument("--lr", type=float, default=1e-4)
+    p.add_argument("--grad-clip", type=float, default=1.0,
+                   help="max grad-norm for clipping; guards against NaN blow-ups")
     p.add_argument("--num-layers", type=int, default=4)
     p.add_argument("--img-size", type=int, default=256)
     p.add_argument("--val-frac", type=float, default=0.2)
@@ -92,22 +94,36 @@ def main():
     best = float("inf")
     for epoch in range(1, args.epochs + 1):
         model.train()
-        t0, running = time.time(), 0.0
+        t0, running, skipped = time.time(), 0.0, 0
         for it, batch in enumerate(train_ld):
             batch = move(batch, args.device)
             hw = (batch["rgbd"].shape[-2], batch["rgbd"].shape[-1])
             preds_3d, preds_2d = model(batch["rgbd"], batch["proj"], hw)
             losses = decoder_losses(preds_3d, preds_2d, batch["landmarks_3d"],
                                     batch["landmarks_2d"], batch["vis"])
+            loss = losses["total"]
+            # Skip a batch whose loss is already non-finite (do not backward NaN).
+            if not torch.isfinite(loss):
+                skipped += 1
+                continue
             opt.zero_grad()
-            losses["total"].backward()
-            opt.step()
-            running += losses["total"].item()
+            loss.backward()
+            # Clip returns the pre-clip total grad norm; if the grads themselves are
+            # non-finite (e.g. an SVD-backward NaN), skip the step so the optimizer
+            # never writes NaN into the weights. This is what makes the run recover
+            # from a single bad batch instead of collapsing permanently.
+            gnorm = torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+            if torch.isfinite(gnorm):
+                opt.step()
+                running += loss.item()
+            else:
+                skipped += 1
         sched.step()
 
         val_mpjpe = evaluate(model, val_ld, args.device)
-        print(f"epoch {epoch:3d}  train_loss {running/max(len(train_ld),1):8.3f}  "
-              f"val_MPJPE {val_mpjpe:7.2f} mm  ({time.time()-t0:.0f}s)")
+        skip_note = f"  skipped {skipped}" if skipped else ""
+        print(f"epoch {epoch:3d}  train_loss {running/max(len(train_ld)-skipped,1):8.3f}  "
+              f"val_MPJPE {val_mpjpe:7.2f} mm  ({time.time()-t0:.0f}s){skip_note}")
 
         ckpt = {"model": model.state_dict(), "epoch": epoch, "val_mpjpe": val_mpjpe,
                 "args": vars(args)}

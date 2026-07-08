@@ -113,5 +113,9 @@ def triangulate_dlt_batch(
     A = torch.cat([row_u, row_v], dim=1)   # (M, 2V, 4)
     U, S, Vh = torch.linalg.svd(A)         # Vh: (M, 4, 4)
     Xh = Vh[:, -1, :]                      # (M, 4) smallest right-singular vector
-    X = Xh[:, :3] / Xh[:, 3:4]             # (M, 3) dehomogenize
+    # Dehomogenize with a signed floor on the homogeneous coord: a near-zero w
+    # (point near infinity / degenerate rays) would otherwise blow X up to Inf.
+    w = Xh[:, 3:4]
+    w_safe = w.abs().clamp(min=1e-8) * torch.where(w < 0, -1.0, 1.0)
+    X = Xh[:, :3] / w_safe                 # (M, 3) dehomogenize
     return X

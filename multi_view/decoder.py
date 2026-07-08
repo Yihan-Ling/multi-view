@@ -53,10 +53,15 @@ class ProjectiveAttention(nn.Module):
         # Batched version of geometry.project: homogenize (append a 1 -> (B,N,Q,4)),
         # multiply by proj (per (b,n): x_h @ P.T; einsum 'bnij,bnqj->bnqi'), then
         # perspective-divide the first two coords by the third.
-        ones = torch.ones(B, N, Q, 1)
+        ones = torch.ones(B, N, Q, 1, device=q.device, dtype=q.dtype)
         hom = torch.cat([q, ones], dim=-1)                  # (B,N,Q,4)  append the 1
         uvw = torch.einsum('bnij,bnqj->bnqi', proj, hom)    # (B,N,Q,3)  the [a,b,c]
-        uv = uvw[..., :2] / uvw[..., 2:3]                   # (B,N,Q,2)  perspective divide
+        # Perspective divide, but floor the projective depth away from 0 so a query
+        # that wanders onto a camera plane can't produce Inf/NaN (which would poison
+        # the SVD backward downstream). Keep the sign so front/behind is preserved.
+        z = uvw[..., 2:3]
+        z_safe = z.abs().clamp(min=1e-6) * torch.where(z < 0, -1.0, 1.0)
+        uv = uvw[..., :2] / z_safe                          # (B,N,Q,2)  perspective divide
 
         # BLANK 2: normalize uv (pixels) to a grid_sample grid in [-1, 1].
         # We use align_corners=False below, whose inverse mapping is

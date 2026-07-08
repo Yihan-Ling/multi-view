@@ -9,6 +9,13 @@ Live project checklist. Update the checkboxes as work progresses. Dates are abso
 > Closing the synthetic→real gap is the current scientific question; the multi-view
 > RGB-D pose pipeline below remains the longer-term goal that this de-risks.
 
+> **Update (2026-07-08):** the active track has advanced to **building the
+> early-fusion multi-view 3D-landmark model (iteration 1)** — see
+> [Iteration 1 below](#iteration-1--early-fusion-multi-view-3d-landmarks-active-2026-07).
+> All model + training code is built and verified this week (overfit keystone
+> passed); next is the first full training run on Great Lakes and the
+> RGB-D vs RGB-only ablation.
+
 ## Current active track: HRNet sim2real landmark transfer
 
 Metric = inter-ocular NME on real images. Train = FaceScape synthetic renders
@@ -71,6 +78,52 @@ distance (lm36–lm45).
 
 Architecture invariant: **CNN ResNet backbone → transformer decoder** (keep this
 feeding order throughout).
+
+### Iteration 1 — early-fusion multi-view 3D landmarks (ACTIVE, 2026-07)
+
+An MVGFormer-style pipeline that stops at 3D landmarks (no 6-DoF yet), with
+**early fusion** of depth (RGB-D as a 4-channel ResNet input). Build plan:
+[docs/early_fusion_iter1_buildplan.md](early_fusion_iter1_buildplan.md).
+**All model + training code built and verified this week; ready for the first full
+training run.**
+
+- [x] Phase 0 — camera geometry: `project` + differentiable DLT `triangulate`
+  (round-trip test exact to $\sim 10^{-11}$).
+- [x] Phase 1 — multi-view RGB-D dataset (`virtual_camera_data`, 246 subjects,
+  5 views; schema-aware loader; geometric visibility; reprojection exact to $0$ px).
+- [x] Phase 2 — mean-face template from the **FaceScape bilinear model** (average of
+  847 subjects, neutral expression); metric query box from the data.
+- [x] Phase 3 — 4-channel RGB-D ResNet-50 + 3-deconv backbone, multi-view wired
+  ($(B,N,4,H,W) \to (B,N,256,128,128)$).
+- [x] Phase 4 — projective attention (project queries → grid-sample → mean-fuse).
+- [x] Phase 5 — decoder $\times 4$ (self-attention, 2D-offset + confidence heads,
+  confidence-weighted triangulation). **Keystone overfit test: one sample
+  $41.3 \to 0.95$ mm, per-layer refinement confirmed.**
+- [x] Phase 6 — deep-supervised losses (3D L1 + visibility-masked 2D L1).
+- [x] Phase 7 — training script (subject-disjoint split, from scratch), GPU-verified
+  end-to-end; Great Lakes sbatch ready ([scripts/greatlakes_early_fusion.sbatch](../scripts/greatlakes_early_fusion.sbatch)).
+- [x] **Run the first full training on Great Lakes** → best held-out MPJPE
+  $\approx 9.98$ mm (RGB-D arm, epoch 30 of 40; converges ~ep30 then mildly overfits
+  — train loss keeps dropping while val plateaus, expected with 197 train subjects).
+  Required three numerical-stability fixes first (NaN blow-up at ep12 on the initial
+  run): signed floor on the perspective-divide depth ([multi_view/decoder.py](../multi_view/decoder.py)),
+  signed floor on the DLT dehomogenize ([multi_view/geometry.py](../multi_view/geometry.py)),
+  and grad-norm clipping + skip-non-finite-grad guard in the train loop.
+- [ ] **RGB-D vs RGB-only ablation** — the headline result (early fusion's contribution).
+  Re-run identical recipe with `--no-depth --out output/early_fusion_rgbonly`.
+- [ ] Diagnose per-layer / per-region error; tune (lr, $\lambda_{2D}$, epochs) if needed.
+
+Key differences vs MVGFormer: single face + fixed 68 landmark queries (no detection /
+Hungarian / NMS / `SPACE_SIZE`), absolute metric coordinates, early depth fusion, and
+a simplified pure-PyTorch projective attention (single-point `grid_sample`, mean view
+fusion, single feature scale, no rayconv / structural triangulation / undistortion —
+the deferred future-work list). See
+[docs/references/mvp_mvgformer_study.md](references/mvp_mvgformer_study.md).
+
+**Next week (objectives):** (1) complete the Great Lakes training run and report
+held-out MPJPE; (2) run the RGB-D vs RGB-only ablation; (3) diagnose + tune.
+**Blocker:** Great Lakes (VPN) access; data (`virtual_camera_data`, 8.7 GB) and code
+transfer via `rsync` (GL is not git-tracked).
 
 ### Literature & replication
 
