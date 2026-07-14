@@ -4,8 +4,15 @@ import io
 import random
 
 import numpy as np
-import torch
 from PIL import Image, ImageEnhance, ImageFilter
+
+# torch is only needed by the FaceScapeAug TRAINING class below; the pure-numpy
+# photometric() function does not use it. Guard the import so photometric() can be
+# reused from a torch-free env (e.g. the FaceScape render venv baking aug to disk).
+try:
+    import torch
+except ImportError:  # standalone photometric() use
+    torch = None
 
 # The HRNet vendored lib (Face300W base + transform helpers) is only needed for
 # TRAINING. Guard the import so the pure-numpy photometric() function below can be

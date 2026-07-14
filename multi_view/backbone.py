@@ -1,30 +1,26 @@
 import torch
 from torch import nn
-from torchvision.models import ResNet50_Weights, resnet50
-
-from multi_view.weight_init import init_conv1_4ch_from_pretrained
+from torchvision.models import resnet50
 
 
 class RGBDPoseResNet50(nn.Module):
     """ResNet-50 with a 4-channel (RGBD) first conv and a PoseResNet-style
     deconv head (Xiao, Wu & Wei, ECCV 2018, "Simple Baselines for Human Pose
     Estimation and Tracking"). Output spatial resolution is input / 4.
+
+    From-scratch only: the 4-channel conv1 and the whole ResNet body are randomly
+    initialized (no ImageNet weights). This is the committed training regime; the
+    old ImageNet-pretrained 4-ch bridge was scaffolding and has been removed.
     """
 
     def __init__(
         self,
         num_deconv_layers: int = 3,
         deconv_channels: int = 256,
-        pretrained: bool = True,
     ) -> None:
         super().__init__()
-        weights = ResNet50_Weights.IMAGENET1K_V2 if pretrained else None    # IMAGENET1K_2: ImageNet
-        rn = resnet50(weights=weights)
-
-        original_conv1_weight = rn.conv1.weight.detach().clone() if pretrained else None
-        rn.conv1 = nn.Conv2d(4, 64, kernel_size=7, stride=2, padding=3, bias=False) # Input layer (64, 4, 7, 7)
-        if pretrained:
-            init_conv1_4ch_from_pretrained(rn.conv1, original_conv1_weight)
+        rn = resnet50(weights=None)
+        rn.conv1 = nn.Conv2d(4, 64, kernel_size=7, stride=2, padding=3, bias=False) # 4-ch RGBD input, random init
 
         # Include Stage 1-5
         self.conv1 = rn.conv1
@@ -36,7 +32,7 @@ class RGBDPoseResNet50(nn.Module):
         self.layer3 = rn.layer3
         self.layer4 = rn.layer4
 
-        # Add 3 layers of transposed convolution
+        # Add 3 layers of  deconvolution
         self.deconv_head = self._build_deconv_head(
             in_channels=2048,
             num_layers=num_deconv_layers,
@@ -85,13 +81,9 @@ class MultiViewBackbone(nn.Module):
     fold flattened them.
     """
 
-    def __init__(self, pretrained: bool = False, deconv_channels: int = 256) -> None:
-        # from-scratch path: pretrained=False -> all 4 conv1 channels random-init
-        # (we do NOT call init_conv1_4ch_from_pretrained here).
+    def __init__(self, deconv_channels: int = 256) -> None:
         super().__init__()
-        self.backbone = RGBDPoseResNet50(
-            deconv_channels=deconv_channels, pretrained=pretrained
-        )
+        self.backbone = RGBDPoseResNet50(deconv_channels=deconv_channels)
         self.out_channels = self.backbone.out_channels
 
     def forward(self, rgbd: torch.Tensor) -> torch.Tensor:

@@ -62,8 +62,19 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--cfg", default=DEFAULT_CFG, help="eval yaml (picks the dataset)")
     ap.add_argument("--suffix", default="", help="appended to output filenames, e.g. _wflw")
+    ap.add_argument("--model-file", default="", help="single checkpoint to panel; "
+                    "overrides the hardcoded MODELS list (use with a matching --cfg)")
+    ap.add_argument("--tag", default="model", help="filename tag when --model-file is used")
+    ap.add_argument("--title", default="", help="suptitle when --model-file is used")
     cli = ap.parse_args()
     _Args.cfg = cli.cfg
+
+    # single-model override: panel just this checkpoint (e.g. iter4_retina on the
+    # retina cfg, which is invalid for the landmark-framed models in MODELS).
+    model_list = MODELS
+    if cli.model_file:
+        model_list = [(cli.tag, cli.title or cli.tag, cli.model_file)]
+    os.makedirs(OUTDIR, exist_ok=True)
 
     update_config(config, _Args)
     cudnn.benchmark = config.CUDNN.BENCHMARK
@@ -89,7 +100,7 @@ def main():
         img = np.array(Image.open(os.path.join(config.DATASET.ROOT, fname)).convert("RGB"))
         samples.append((int(idx), gt, img, fname))
 
-    for tag, title, ckpt in MODELS:
+    for tag, title, ckpt in model_list:
         model = models.get_face_alignment_net(config)
         model = nn.DataParallel(model, device_ids=gpus).cuda()
         model.module.load_state_dict(load_state_dict_any(ckpt))

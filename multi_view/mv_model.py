@@ -22,10 +22,10 @@ from multi_view.decoder import MultiViewDecoder
 
 
 class MultiViewLandmark3D(nn.Module):
-    def __init__(self, assets_dir, num_layers: int = 4, pretrained: bool = False,
+    def __init__(self, assets_dir, num_layers: int = 4,
                  use_depth: bool = True, img_size: int | None = None) -> None:
         super().__init__()
-        self.backbone = MultiViewBackbone(pretrained=pretrained)
+        self.backbone = MultiViewBackbone()
         self.decoder = MultiViewDecoder.from_assets(assets_dir, num_layers=num_layers)
         self.use_depth = use_depth
         self.img_size = img_size

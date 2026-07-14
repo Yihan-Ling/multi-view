@@ -24,7 +24,7 @@ def main() -> None:
     B, N, C, H, W = rgbd.shape
     print(f"input rgbd: {tuple(rgbd.shape)}")
 
-    model = MultiViewBackbone(pretrained=False).eval()
+    model = MultiViewBackbone().eval()
     with torch.no_grad():
         feats = model(rgbd)
 

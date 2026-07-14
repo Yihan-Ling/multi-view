@@ -9,12 +9,17 @@ Live project checklist. Update the checkboxes as work progresses. Dates are abso
 > Closing the synthetic→real gap is the current scientific question; the multi-view
 > RGB-D pose pipeline below remains the longer-term goal that this de-risks.
 
-> **Update (2026-07-08):** the active track has advanced to **building the
-> early-fusion multi-view 3D-landmark model (iteration 1)** — see
+> **Update (2026-07-13):** iteration 1 of the **early-fusion multi-view 3D-landmark
+> model** is **trained and the depth ablation is complete** — see
 > [Iteration 1 below](#iteration-1--early-fusion-multi-view-3d-landmarks-active-2026-07).
-> All model + training code is built and verified this week (overfit keystone
-> passed); next is the first full training run on Great Lakes and the
-> RGB-D vs RGB-only ablation.
+> Result: RGB-D $\approx 3.47$–$3.51$ mm vs RGB-only $3.55$ mm held-out MPJPE — depth
+> gives **no measurable benefit** on the clean, well-conditioned 5-view synthetic set
+> (delta is within the $\sim 0.05$ mm run-to-run noise floor; both arms hit the same
+> $\sim 3.5$ mm data-limited floor). **Next track: "messy data" — apply the same
+> sim-to-real domain randomization that worked for HRNet (random-background
+> compositing + blur + a randomized camera ring) to robustly prove the model works
+> under realistic, varied conditions rather than an easy fixed-rig in-domain set.** See
+> [Iteration 2 below](#iteration-2--robustness-under-messy-data-active-2026-07).
 
 ## Current active track: HRNet sim2real landmark transfer
 
@@ -84,8 +89,9 @@ feeding order throughout).
 An MVGFormer-style pipeline that stops at 3D landmarks (no 6-DoF yet), with
 **early fusion** of depth (RGB-D as a 4-channel ResNet input). Build plan:
 [docs/early_fusion_iter1_buildplan.md](early_fusion_iter1_buildplan.md).
-**All model + training code built and verified this week; ready for the first full
-training run.**
+**Complete: trained end-to-end and the depth ablation is run.** Headline — depth as a
+4th input channel is *neutral* on clean well-conditioned synthetic; this motivates the
+messy-data robustness track (Iteration 2).
 
 - [x] Phase 0 — camera geometry: `project` + differentiable DLT `triangulate`
   (round-trip test exact to $\sim 10^{-11}$).
@@ -102,16 +108,29 @@ training run.**
 - [x] Phase 6 — deep-supervised losses (3D L1 + visibility-masked 2D L1).
 - [x] Phase 7 — training script (subject-disjoint split, from scratch), GPU-verified
   end-to-end; Great Lakes sbatch ready ([scripts/greatlakes_early_fusion.sbatch](../scripts/greatlakes_early_fusion.sbatch)).
-- [x] **Run the first full training on Great Lakes** → best held-out MPJPE
-  $\approx 9.98$ mm (RGB-D arm, epoch 30 of 40; converges ~ep30 then mildly overfits
-  — train loss keeps dropping while val plateaus, expected with 197 train subjects).
-  Required three numerical-stability fixes first (NaN blow-up at ep12 on the initial
-  run): signed floor on the perspective-divide depth ([multi_view/decoder.py](../multi_view/decoder.py)),
-  signed floor on the DLT dehomogenize ([multi_view/geometry.py](../multi_view/geometry.py)),
-  and grad-norm clipping + skip-non-finite-grad guard in the train loop.
-- [ ] **RGB-D vs RGB-only ablation** — the headline result (early fusion's contribution).
-  Re-run identical recipe with `--no-depth --out output/early_fusion_rgbonly`.
-- [ ] Diagnose per-layer / per-region error; tune (lr, $\lambda_{2D}$, epochs) if needed.
+- [x] **First full training** (Great Lakes A40, RGB-D) → best held-out MPJPE
+  $\approx 9.98$ mm at bs8/40ep. Required three numerical-stability fixes first (NaN
+  blow-up at ep12): signed floor on the perspective-divide depth
+  ([multi_view/decoder.py](../multi_view/decoder.py)), signed floor on the DLT
+  dehomogenize ([multi_view/geometry.py](../multi_view/geometry.py)), and grad-norm
+  clipping + skip-non-finite-grad guard in the train loop.
+- [x] **Moved to laptop** (RTX 4060, bs2/img256) — the job is small ($\sim 14$ s/epoch),
+  so GL was overkill. Smaller batch (4$\times$ more grad steps/epoch) + longer cosine
+  dropped held-out MPJPE $\approx 3\times$: **3.47 mm @ 60 ep, 3.38 mm @ 100 ep** (RGB-D).
+  Epochs past $\sim 80$ give diminishing returns — **data-limited floor $\sim 3.5$ mm**
+  on 197 train subjects. Established a **run-to-run noise floor $\sim 0.05$ mm** (CUDA
+  nondeterminism: identical recipe gave 3.47 vs 3.51 mm).
+- [x] **RGB-D vs RGB-only ablation** (60 ep each, same laptop/bs): RGB-only **3.55 mm**
+  vs RGB-D $\approx 3.49$ mm → **depth is neutral here** — the $\sim 0.06$ mm delta is
+  within the noise floor. Consistent with theory: the 5-view rig is already
+  well-conditioned (triangulation nails depth without a sensor), clean renders leave RGB
+  no localization headroom for depth to add, and both arms hit the same data-limited
+  floor. Implication: depth's payoff needs *weak* geometry / degraded inputs → Iteration 2.
+- [x] **Metric logging** added to [scripts/train_early_fusion.py](../scripts/train_early_fusion.py):
+  each run writes `metrics.csv` (`epoch,lr,train_loss,val_loss,val_mpjpe,skipped,sec`)
+  and `train.log`; `evaluate()` now also reports validation loss.
+- [ ] (Optional) Multi-seed (0/1/2) per arm to statistically confirm "depth neutral"
+  (RGB-D mean inside RGB-only spread).
 
 Key differences vs MVGFormer: single face + fixed 68 landmark queries (no detection /
 Hungarian / NMS / `SPACE_SIZE`), absolute metric coordinates, early depth fusion, and
@@ -120,10 +139,46 @@ fusion, single feature scale, no rayconv / structural triangulation / undistorti
 the deferred future-work list). See
 [docs/references/mvp_mvgformer_study.md](references/mvp_mvgformer_study.md).
 
-**Next week (objectives):** (1) complete the Great Lakes training run and report
-held-out MPJPE; (2) run the RGB-D vs RGB-only ablation; (3) diagnose + tune.
-**Blocker:** Great Lakes (VPN) access; data (`virtual_camera_data`, 8.7 GB) and code
-transfer via `rsync` (GL is not git-tracked).
+### Iteration 2 — robustness under messy data (ACTIVE, 2026-07)
+
+**Motivation.** Iteration 1 was trained and evaluated on a *clean, fixed-rig* synthetic
+set — same 5 camera viewpoints every subject, black background, sharp renders. That is an
+easy in-domain setting. To **robustly prove the model actually works** (not just memorizes
+an easy distribution) and to move toward real deployment, apply the **same sim-to-real
+domain randomization that gave the HRNet landmark model a $\sim 3.4\times$ real-image
+improvement**: random backgrounds, blur, and — the multi-view-specific addition — a
+**randomized camera ring** so the model is not tied to one fixed rig.
+
+Design principle: augment the **RGB inputs only**; the depth channel and the 3D/2D
+**ground-truth labels stay clean**, so MPJPE remains an honest metric. Applied to **both
+train and val** (train = fresh randomness each epoch; val = fixed per-sample for a stable
+metric).
+
+- [x] **Background + blur augmentation** — `multi_view/data/augment.py`
+  (`AugConfig` + `MultiViewAugmentor`): per-view random-background compositing (indoor
+  photos, keyed off the `binary_fill_holes(depth>0)` silhouette so nothing leaks through
+  the eyeless eye-holes) + Gaussian blur. Wired into the Dataset (`augmentor`,
+  `aug_deterministic`) and the train script (`--bg-prob`, `--blur-prob`,
+  `--blur-sigma-max`). Verified on real data (RGB changes; depth + GT untouched; val
+  deterministic); preview `scratch/iter2_aug_preview.png`.
+- [x] **Randomized camera ring** — `render_views.py` gained `random_ring()` (per-subject
+  random radius / FOV / azimuth arc / elevation, 5 views fixed for batching) + a
+  `--rand_ring` flag and `--out_root`/`--data_root` CLI. Removes the fixed-rig limitation.
+- [ ] **Re-render** the 246-subject set with `--rand_pose --rand_ring` to a new dir
+  (`virtual_camera_random_ring`), preserving the fixed-rig set. **Needs the EGL render env
+  (`.venv-data`), which is not on the laptop — run where that env lives (desktop).**
+- [ ] **Train + report** the RGB-D model on the messy data (random ring + bg + blur),
+  compare held-out MPJPE to the clean $\sim 3.5$ mm baseline. Success = stays accurate and
+  generalizes under realistic messy conditions.
+
+**Note:** later short-baseline / fewer-view experiments overlap the deferred
+**depth scale-anchor** idea and the teammate's **late-fusion** track — coordinate so the
+experiments don't collide.
+
+**This week (objectives):** (1) eyeball the bg+blur preview; (2) run a bg+blur training
+pass on the existing fixed-rig data (decoupled from the re-render); (3) re-render the
+random-ring set on the desktop; (4) train + report on the fully messy data. Training runs
+on the laptop; only rendering needs the EGL env.
 
 ### Literature & replication
 

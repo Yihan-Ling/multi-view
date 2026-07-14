@@ -42,19 +42,39 @@ from scipy.ndimage import binary_fill_holes
 from torch.utils.data import Dataset
 
 
+def _base_identity(name: str) -> str:
+    """Identity of a subject folder. Baked-augmentation variants are named
+    ``<id>_<k>`` (same person, different pose/ring/appearance draw); the plain
+    ``<id>`` folder is its own identity. Split/grouping keys on this."""
+    return name.split("_")[0]
+
+
 def subject_disjoint_split(subject_ids, val_frac: float = 0.2, seed: int = 0):
-    """Partition subject ids into (train, val) with NO identity in both. Mirrors
-    the split logic in scripts/facescape/build_hrnet_landmark_dataset.py."""
+    """Partition subject ids into (train, val) with NO identity in both. Splits by
+    BASE IDENTITY, so every baked ``<id>_<k>`` variant of a person lands in the same
+    split (no identity leakage). For plain-digit ids this is identical to the old
+    behaviour. Mirrors build_hrnet_landmark_dataset.py's subject-disjoint logic."""
+    bases = sorted({_base_identity(x) for x in subject_ids})
+    random.Random(seed).shuffle(bases)
+    n_val = max(1, int(round(len(bases) * val_frac)))
+    val_bases = set(bases[:n_val])
     ids = sorted(subject_ids)
-    random.Random(seed).shuffle(ids)
-    n_val = max(1, int(round(len(ids) * val_frac)))
-    return ids[n_val:], ids[:n_val]
+    train = [x for x in ids if _base_identity(x) not in val_bases]
+    val = [x for x in ids if _base_identity(x) in val_bases]
+    return train, val
 
 
 def discover_subjects(root):
+    """List subject folders: plain ``<id>`` or baked variants ``<id>_<k>`` (all
+    digits either side of the underscore). Ordered by (identity, variant)."""
     root = Path(root)
-    return sorted((d.name for d in root.iterdir() if d.is_dir() and d.name.isdigit()),
-                  key=int)
+    def ok(n: str) -> bool:
+        parts = n.split("_")
+        return len(parts) in (1, 2) and all(p.isdigit() for p in parts)
+    def key(n: str):
+        parts = n.split("_")
+        return (int(parts[0]), int(parts[1]) if len(parts) == 2 else -1)
+    return sorted((d.name for d in root.iterdir() if d.is_dir() and ok(d.name)), key=key)
 
 
 def _project_np(pts_world: np.ndarray, P: np.ndarray) -> np.ndarray:
@@ -72,18 +92,31 @@ class MultiViewFaceScape(Dataset):
         depth_scale: float = 200.0,
         vis_tol: float = 10.0,
         transform=None,
+        augmentor=None,
+        aug_deterministic: bool = False,
+        aug_seed: int = 0,
     ):
         # subject-disjoint split lives at the caller: pass the subject id list for
         # this split. Each subject is one multi-view item.
         # `vis_tol` (depth units): a landmark counts as visible if its camera-z is
         # within this margin of, or in front of, the rendered surface at its pixel.
-        # `transform` is an optional callable(sample_dict) -> sample_dict applied
-        # before returning (augmentation hook). None = clean data, no aug.
+        # `transform` is an optional callable(sample_dict, index) -> sample_dict
+        # applied before returning (augmentation / corruption hook). None = clean
+        # data. The index lets a transform seed deterministically per sample (e.g.
+        # fixed val-set corruption for a stable metric) or stay random (train aug).
+        # `augmentor` (MultiViewAugmentor|None): per-view RGB domain randomization
+        # (background composite + blur) applied on the raw RGB using the depth>0
+        # silhouette. `aug_deterministic`: seed the per-view RNG from (index, view)
+        # so the same sample is augmented identically every epoch (val); False =
+        # fresh randomness each epoch (train). `aug_seed` seeds the deterministic case.
         self.root = Path(root)
         self.subject_ids = list(subject_ids)
         self.depth_scale = depth_scale
         self.vis_tol = vis_tol
         self.transform = transform
+        self.augmentor = augmentor
+        self.aug_deterministic = aug_deterministic
+        self.aug_seed = aug_seed
 
     def __len__(self) -> int:
         return len(self.subject_ids)
@@ -127,7 +160,7 @@ class MultiViewFaceScape(Dataset):
             lm_world = (r0["lm_cam"] - r0["t"]) @ r0["R"]                        # (68,3)
 
         rgbd, proj, lm2d, vis = [], [], [], []
-        for r in raws:
+        for j, r in enumerate(raws):
             K, R, t = r["K"], r["R"], r["t"]
             rgb, depth, lm_cam, uv = r["rgb"], r["depth"], r["lm_cam"], r["uv"]
 
@@ -136,6 +169,16 @@ class MultiViewFaceScape(Dataset):
             holes = filled & ~face
             med = np.median(depth[face])
             depth = np.where(holes, med, depth)
+
+            # Per-view RGB domain randomization (bg composite + blur) on the raw
+            # RGB, keyed off the raw depth>0 face mask so the background bleeds
+            # through the eye holes (requested for the iter-2 messy-data run).
+            if self.augmentor is not None:
+                if self.aug_deterministic:
+                    vrng = np.random.default_rng(self.aug_seed * 1_000_003 + i * 32 + j)
+                else:
+                    vrng = np.random.default_rng()
+                rgb = self.augmentor.apply(rgb, face, vrng)
 
             depth_n = (depth - med) / self.depth_scale
 
@@ -178,5 +221,5 @@ class MultiViewFaceScape(Dataset):
             "vis": torch.from_numpy(np.stack(vis)).float(),            # (N,68)
         }
         if self.transform is not None:
-            sample = self.transform(sample)
+            sample = self.transform(sample, i)
         return sample

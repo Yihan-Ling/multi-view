@@ -38,7 +38,7 @@ def main() -> None:
     vis = s["vis"].unsqueeze(0).to(device)
     image_hw = (rgbd.shape[-2], rgbd.shape[-1])
 
-    model = MultiViewLandmark3D(ASSETS, num_layers=4, pretrained=False,
+    model = MultiViewLandmark3D(ASSETS, num_layers=4,
                                 use_depth=True, img_size=256).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=1e-3)
 

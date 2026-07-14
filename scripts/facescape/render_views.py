@@ -1,5 +1,6 @@
 import argparse
 import json
+import sys
 from pathlib import Path
 from dataclasses import dataclass
 
@@ -9,6 +10,10 @@ import trimesh
 import pyrender          # run with PYOPENGL_PLATFORM=egl for headless GPU
 from PIL import Image
 from tqdm import tqdm
+
+# Repo root on the path so we can reuse the training-time augmentor (single source
+# of truth for the bg+photometric recipe) when baking it into the renders.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 @dataclass
 class Camera:
@@ -279,14 +284,14 @@ class ViewRenderer:
         
 
     def run(self, id_range, cameras, orientation=(0.0, 0.0, 0.0), lighting=False,
-            rand_pose=False):
+            rand_pose=False, rand_ring=False, variants=1, augmentor=None, lean=False):
         # parse id_range
         if "-" in id_range:
             l, r = id_range.split("-")
             ids = [str(i) for i in range(int(l), int(r)+1)]
         else:
             ids = [id_range]
-        
+
         bar = tqdm(ids, desc="rendering")
         for id in bar:
             bar.set_postfix_str(id)
@@ -296,60 +301,86 @@ class ViewRenderer:
             if not obj.is_file():
                 print(f"  warning: no mesh for id {id}, skipping: {obj}")
                 continue
-            roll, pitch, yaw = random_orientation() if rand_pose else orientation
-            mesh = self.load_mesh(id=id)
-            self.orient_head(mesh, roll, pitch, yaw)
-            lm_w = mesh.metadata["lm_world"]    # landmark in world frame
-            cams = load_camera(cameras) if cameras else default_ring(mesh)
-            overlays = []                       # collect per-cam overlays for the panel
 
-            for i, cam in enumerate(cams):
-                cam.id = str(i)                 # output ids are ALWAYS 0,1,2,... regardless of source
-                color, depth = self.render(mesh, cam)
-                landmarks = self.project_landmarks(mesh, cam)
-                pts, cols = self.backproject(depth=depth, K=cam.K, color=color)
-                lm_cam = (cam.R @ lm_w.T).T + cam.t     # landmark in camera frame
-                R_ch   = cam.R @ mesh.metadata["head_R"]    # head orientation in camera frame
-                t_ch   = cam.R @ mesh.metadata["head_t"] + cam.t    # head position in camera frame
-                quat   = rotmat_to_quat(R_ch)   # R_ch in quaternion
-                
-                # write data
-                out_dir = self.out_root / id / cam.id
-                overlay = self.write_view(out_dir=out_dir, color=color, depth=depth, landmarks=landmarks)
-                overlays.append(overlay)
-                flip = np.array([1.0, -1.0, -1.0])
-                pts_gl = pts * flip
-                trimesh.PointCloud(vertices=pts_gl, colors=cols).export(out_dir / "rgbd.ply")
-                lm_dots = np.tile([255, 0, 0], (len(lm_cam), 1))
-                all_pts = np.vstack([pts_gl, lm_cam * flip])    # landmarks in the same camera frame
-                all_colors = np.vstack([cols, lm_dots])
-                trimesh.PointCloud(vertices=all_pts, colors=all_colors).export(out_dir / "rgbd_landmarks_overlay.ply")
-                meta = {
-                    "id": cam.id, "W": cam.W, "H": cam.H,
-                    "K": cam.K.tolist(), "R": cam.R.tolist(), "t": cam.t.tolist(),
-                    "head_quat": quat.tolist(), "head_t_cam": t_ch.tolist(),
-                    "orientation_deg": [roll, pitch, yaw], "units": "facescape_world"
-                }
-                (out_dir / "meta.json").write_text(json.dumps(meta, indent=2))
-                np.save(out_dir / "landmarks_2d.npy", landmarks)   # (68,2) uv
-                np.save(out_dir / "landmarks_3d.npy", lm_cam)       # (68,3) camera frame
+            # Each variant = a fresh draw of head pose + camera ring + baked RGB aug,
+            # written as its own multi-view item "<id>_<k>" (variants==1 keeps the
+            # plain "<id>" folder for backward compatibility). orient_head mutates the
+            # mesh in place, so reload it per variant.
+            for k in range(variants):
+                roll, pitch, yaw = random_orientation() if rand_pose else orientation
+                mesh = self.load_mesh(id=id)
+                self.orient_head(mesh, roll, pitch, yaw)
+                lm_w = mesh.metadata["lm_world"]    # landmark in world frame
+                if cameras:
+                    cams = load_camera(cameras)
+                elif rand_ring:
+                    cams = random_ring(mesh)       # resampled per variant
+                else:
+                    cams = default_ring(mesh)
+                subj_out = id if variants == 1 else f"{id}_{k}"
+                overlays = []                       # per-cam overlays for the panel
 
-            # all camera overlays side by side, under the id folder (parent of cam dirs)
-            panel = self.save_panel(self.out_root / id / "panel.png", overlays)
-            
-            if lighting:
-                grid = []
-                for k in range(1, 5):
-                    row = []
-                    light = generate_random_light()
-                    for i, cam in enumerate(cams):
-                        cam.id = str(i)
-                        color, _ = self.render(mesh, cam, light=light)
-                        out_dir = self.out_root / id / cam.id
-                        Image.fromarray(color).save(out_dir / f"rgb_{k}.png")
-                        row.append(color)
-                    grid.append(row)
-                self.save_grid(path=self.out_root / id / "lighting_panel.png", grid=grid)
+                for i, cam in enumerate(cams):
+                    cam.id = str(i)                 # output ids are ALWAYS 0,1,2,...
+                    color, depth = self.render(mesh, cam)
+                    # Bake domain randomization (bg composite + HRNet photometric) into
+                    # the saved RGB, keyed off the raw depth>0 mask so bg leaks through
+                    # the eye holes. Fresh randomness per view; depth + GT stay clean.
+                    if augmentor is not None:
+                        rgb01 = augmentor.apply(color.astype(np.float32) / 255.0,
+                                                depth > 0, np.random.default_rng())
+                        color = (np.clip(rgb01, 0, 1) * 255).astype(np.uint8)
+                    landmarks = self.project_landmarks(mesh, cam)
+                    lm_cam = (cam.R @ lm_w.T).T + cam.t     # landmark in camera frame
+                    R_ch   = cam.R @ mesh.metadata["head_R"]    # head orientation in camera frame
+                    t_ch   = cam.R @ mesh.metadata["head_t"] + cam.t    # head position in camera frame
+                    quat   = rotmat_to_quat(R_ch)   # R_ch in quaternion
+
+                    out_dir = self.out_root / subj_out / cam.id
+                    out_dir.mkdir(parents=True, exist_ok=True)
+                    Image.fromarray(color).save(out_dir / "rgb.png")
+                    np.save(out_dir / "depth.npy", depth)
+                    meta = {
+                        "id": cam.id, "W": cam.W, "H": cam.H,
+                        "K": cam.K.tolist(), "R": cam.R.tolist(), "t": cam.t.tolist(),
+                        "head_quat": quat.tolist(), "head_t_cam": t_ch.tolist(),
+                        "orientation_deg": [roll, pitch, yaw], "units": "facescape_world"
+                    }
+                    (out_dir / "meta.json").write_text(json.dumps(meta, indent=2))
+                    np.save(out_dir / "landmarks_2d.npy", landmarks)   # (68,2) uv
+                    np.save(out_dir / "landmarks_3d.npy", lm_cam)       # (68,3) camera frame
+
+                    # Debug artifacts (landmark overlay, point clouds) -- skipped in
+                    # --lean mode, which is what you want when baking many variants.
+                    if not lean:
+                        overlay = self.draw_landmarks(color, landmarks)
+                        Image.fromarray(overlay).save(out_dir / "rgb_landmark_overlay.png")
+                        overlays.append(overlay)
+                        pts, cols = self.backproject(depth=depth, K=cam.K, color=color)
+                        flip = np.array([1.0, -1.0, -1.0])
+                        pts_gl = pts * flip
+                        trimesh.PointCloud(vertices=pts_gl, colors=cols).export(out_dir / "rgbd.ply")
+                        lm_dots = np.tile([255, 0, 0], (len(lm_cam), 1))
+                        all_pts = np.vstack([pts_gl, lm_cam * flip])
+                        all_colors = np.vstack([cols, lm_dots])
+                        trimesh.PointCloud(vertices=all_pts, colors=all_colors).export(out_dir / "rgbd_landmarks_overlay.ply")
+
+                if not lean:
+                    # all camera overlays side by side, under the item folder
+                    self.save_panel(self.out_root / subj_out / "panel.png", overlays)
+                    if lighting:
+                        grid = []
+                        for kk in range(1, 5):
+                            row = []
+                            light = generate_random_light()
+                            for i, cam in enumerate(cams):
+                                cam.id = str(i)
+                                color, _ = self.render(mesh, cam, light=light)
+                                out_dir = self.out_root / subj_out / cam.id
+                                Image.fromarray(color).save(out_dir / f"rgb_{kk}.png")
+                                row.append(color)
+                            grid.append(row)
+                        self.save_grid(path=self.out_root / subj_out / "lighting_panel.png", grid=grid)
 
 
 
@@ -375,6 +406,35 @@ def default_ring(mesh, n=5, radius=380.0, fov_deg=40.0, W=512, H=512,
         R, t = look_at_cv(eye, centroid)       # +Y up; given primitive
         cams.append(Camera(id=f"cam{i:02d}", W=W, H=H, K=K, R=R, t=t))
     return cams
+
+def random_ring(mesh, n=5, W=512, H=512):
+    """Randomized front-biased camera ring, resampled PER SUBJECT (iteration-2
+    robustness). Removes the fixed-rig limitation of `default_ring`: the model no
+    longer sees the same 5 viewpoints every subject. n is kept fixed (=5) so all
+    subjects have the same view count (the multi-view model batches on N); only the
+    ring GEOMETRY varies -- radius, FOV, azimuth arc (center + width + per-cam
+    jitter), and ring elevation (center + per-cam jitter). Still front-biased (the
+    back of the head carries no info). Returns Camera objects like default_ring."""
+    centroid = mesh.vertices.mean(axis=0)
+    radius = np.random.uniform(340.0, 420.0)
+    fov_deg = np.random.uniform(35.0, 45.0)
+    K = intrinsics_from_fov(fov_deg, W, H)
+    # azimuth: random arc center + half-width, plus small per-camera jitter.
+    az_center = np.random.uniform(-15.0, 15.0)
+    az_half = np.random.uniform(35.0, 60.0)
+    az_deg = np.linspace(az_center - az_half, az_center + az_half, n) \
+        + np.random.uniform(-5.0, 5.0, size=n)
+    # elevation: random ring tilt + per-camera jitter (vertical viewpoint diversity).
+    el_deg = np.random.uniform(-12.0, 12.0) + np.random.uniform(-5.0, 5.0, size=n)
+    azr, elr = np.radians(az_deg), np.radians(el_deg)
+    cams = []
+    for i, (az, el) in enumerate(zip(azr, elr)):
+        direction = np.array([np.cos(el) * np.sin(az), np.sin(el), np.cos(el) * np.cos(az)])
+        eye = centroid + radius * direction
+        R, t = look_at_cv(eye, centroid)       # +Y up; given primitive
+        cams.append(Camera(id=f"cam{i:02d}", W=W, H=H, K=K, R=R, t=t))
+    return cams
+
 
 def random_orientation(pitch_max=25.0, yaw_max=35.0):
     """Random head orientation for --rand_pose. Samples pitch + yaw -- the
@@ -406,7 +466,31 @@ if __name__ == "__main__":
     parser.add_argument("--orientation", type=float, nargs=3, default=(0.0, 0.0, 0.0), metavar=("ROLL", "PITCH", "YAW"))
     parser.add_argument("--lighting", action="store_true", help="True for random lighting conditions, default false")
     parser.add_argument("--rand_pose", action="store_true", help="randomize head pitch+yaw per subject (overrides --orientation)")
+    parser.add_argument("--rand_ring", action="store_true", help="randomize the camera ring geometry per subject (iteration-2 robustness)")
+    parser.add_argument("--variants", type=int, default=1,
+                        help="baked augmentation variants per subject; each is a fresh "
+                             "pose+ring+RGB-aug draw written as <id>_<k> (K-variant bake)")
+    parser.add_argument("--bg_dir", default="data/backgrounds/indoor/Images",
+                        help="background image pool for baked bg compositing")
+    parser.add_argument("--bg_prob", type=float, default=0.0,
+                        help="per-view prob of baking a random background (0=off)")
+    parser.add_argument("--photometric", action="store_true",
+                        help="bake HRNet's photometric ISP jitter into the saved RGB")
+    parser.add_argument("--lean", action="store_true",
+                        help="skip debug artifacts (overlays, point clouds, panels); "
+                             "use when baking many variants to save disk")
+    parser.add_argument("--data_root", default="data/facescape", help="root holding the TU meshes")
+    parser.add_argument("--out_root", default="data/facescape/virtual_camera_data",
+                        help="output dir; use a NEW dir for a random-ring set to keep the fixed-ring set")
     args = parser.parse_args()
-    render = ViewRenderer()
+
+    # Build the shared bg+photometric augmentor if baking is requested.
+    from multi_view.data.augment import AugConfig, MultiViewAugmentor
+    aug_cfg = AugConfig(bg_dir=args.bg_dir, bg_prob=args.bg_prob,
+                        photometric=args.photometric)
+    augmentor = MultiViewAugmentor(aug_cfg) if aug_cfg.enabled else None
+
+    render = ViewRenderer(data_root=args.data_root, out_root=args.out_root)
     render.run(args.id_range, args.cameras, args.orientation, lighting=args.lighting,
-               rand_pose=args.rand_pose)
+               rand_pose=args.rand_pose, rand_ring=args.rand_ring,
+               variants=args.variants, augmentor=augmentor, lean=args.lean)

@@ -10,6 +10,17 @@ import pandas as pd
 from PIL import Image
 from scipy.ndimage import binary_fill_holes
 
+try:
+    from tqdm import tqdm
+except ModuleNotFoundError:                            # keep .venv install-free
+    def tqdm(iterable, desc="", **kwargs):
+        total = kwargs.get("total") or (len(iterable) if hasattr(iterable, "__len__") else None)
+        for i, x in enumerate(iterable, 1):
+            yield x
+            if total and (i % 50 == 0 or i == total):
+                end = "\n" if i == total else ""
+                print(f"\r{desc}: {i}/{total}", end=end, file=sys.stderr, flush=True)
+
 # Shared RetinaFace crop helper lives next to this script (scripts/facescape/).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from face_detector_crop import detect_main_box, box_to_center_scale  # noqa: E402
@@ -127,35 +138,40 @@ def _fit_bg(bg: np.ndarray, H: int, W: int, rng) -> np.ndarray:
     return bg[y0:y0 + H, x0:x0 + W]
 
 
+def fill_interior_holes(img: np.ndarray, mask: np.ndarray, fill_value: int) -> np.ndarray:
+    # The TU mesh has no eyeballs, so the eye region is a depth==0 HOLE. On a
+    # composited image the random background would leak THROUGH the eyes; on a
+    # clean render the render's own (black) background shows through them. Either
+    # way the eyes must be a consistent color. binary_fill_holes gives the solid
+    # head silhouette; depth==0 pixels enclosed by it are interior holes (eyes,
+    # nostrils) -> paint them a constant `fill_value`. Mutates `img` in place.
+    solid = binary_fill_holes(mask)
+    interior_holes = solid & ~mask
+    img[interior_holes] = fill_value
+    return img
+
+
 def composite_over_bg(rgb: np.ndarray, depth: np.ndarray, bg: np.ndarray,
-                      rng, fill_holes_black: bool = True) -> np.ndarray:
+                      rng, fill_holes: bool = True, fill_value: int = 0) -> np.ndarray:
     H, W = rgb.shape[:2]
     mask = depth > 0                                   # rendered face surface
     bg = _fit_bg(bg, H, W, rng).astype(np.uint8)
     out = np.where(mask[..., None], rgb, bg).astype(np.uint8)
-    if fill_holes_black:
-        # The TU mesh has no eyeballs, so the eye region is a depth==0 HOLE.
-        # Without this, the depth>0 matte treats those holes as "not face" and
-        # the random background leaks THROUGH the eyes. binary_fill_holes gives
-        # the solid head silhouette; depth==0 pixels enclosed by it are interior
-        # holes (eyes, nostrils) -> paint them black instead of background, so the
-        # eyes stay a consistent dark region under any background.
-        solid = binary_fill_holes(mask)
-        interior_holes = solid & ~mask
-        out[interior_holes] = 0
+    if fill_holes:
+        out = fill_interior_holes(out, mask, fill_value)
     return out
 
 
 def build_csv(views: list[View], train_type, out_root: Path,
               bg_paths: list[Path], rng: np.random.Generator, composite_prob = 0.8,
-              fill_holes_black: bool = True, crop_mode: str = "landmark",
+              fill_holes: bool = True, fill_value: int = 0, crop_mode: str = "landmark",
               det_gpu_id: int = -1, det_network: str = "mobilenet"):
     images_dir = out_root / "images"
     images_dir.mkdir(parents=True, exist_ok=True)
 
     rows = []
     n_fallback = 0
-    for v in views:
+    for v in tqdm(views, desc=f"build {train_type}", unit="view"):
         relpath, lm_scale, lm_cw, lm_ch, flat_pts = view2row(v)
         out_path = images_dir / relpath
 
@@ -166,7 +182,14 @@ def build_csv(views: list[View], train_type, out_root: Path,
             depth = np.load(v.rgb_path.parent / "depth.npy")
             background = np.asarray(Image.open(bg_paths[rng.integers(len(bg_paths))]).convert("RGB"))
             img = composite_over_bg(rgb, depth, background, rng,
-                                    fill_holes_black=fill_holes_black)
+                                    fill_holes=fill_holes, fill_value=fill_value)
+            Image.fromarray(img).save(out_path)
+        elif fill_holes:
+            # No background composited, but still paint the eye/nostril holes so the
+            # eyes match the composited images instead of showing the render's black bg.
+            rgb = np.asarray(Image.open(v.rgb_path).convert("RGB"))
+            depth = np.load(v.rgb_path.parent / "depth.npy")
+            img = fill_interior_holes(rgb.copy(), depth > 0, fill_value)
             Image.fromarray(img).save(out_path)
         else:
             shutil.copy(v.rgb_path, out_path)
@@ -199,7 +222,7 @@ def build_csv(views: list[View], train_type, out_root: Path,
 
 def main(data_root, out_root,
          bg_root="data/backgrounds/indoor/Images", seed=0, composite_prob=0.8,
-         fill_holes_black=True, crop_mode="landmark", det_gpu_id=-1,
+         fill_holes=True, fill_value=0, crop_mode="landmark", det_gpu_id=-1,
          det_network="mobilenet"):
 
     rng = np.random.default_rng(seed)
@@ -214,7 +237,7 @@ def main(data_root, out_root,
     bg_paths = load_background_paths(Path(bg_root)) if composite_prob > 0 else []
     for n in ("train", "val"):
         build_csv(split[n], n, out_root, bg_paths, rng, composite_prob,
-                  fill_holes_black, crop_mode=crop_mode, det_gpu_id=det_gpu_id,
+                  fill_holes, fill_value, crop_mode=crop_mode, det_gpu_id=det_gpu_id,
                   det_network=det_network)
 
 
@@ -232,10 +255,14 @@ def parse_args():
                    help="Per-view probability of compositing a random background "
                         "(0 = clean renders / no background aug).")
     p.add_argument("--fill-holes", action="store_true", default=True,
-                   help="Paint interior depth==0 holes (eyes) black instead of "
-                        "letting the background leak through them (default on).")
+                   help="Paint interior depth==0 holes (eyes) a constant color instead "
+                        "of letting the background leak through them (default on). "
+                        "Color set by --fill-color.")
     p.add_argument("--no-fill-holes", dest="fill_holes", action="store_false",
                    help="Disable hole filling; background leaks through the eye holes.")
+    p.add_argument("--fill-color", choices=["black", "white"], default="black",
+                   help="Color for filled eye/nostril holes (only with --fill-holes): "
+                        "'black' = 0 (old default), 'white' = 255.")
     p.add_argument("--crop-mode", choices=["landmark", "retinaface"], default="landmark",
                    help="Framing source: 'landmark' = GT-landmark bbox (old default); "
                         "'retinaface' = RetinaFace detection box (must match the eval "
@@ -253,5 +280,6 @@ if __name__ == "__main__":
     args = parse_args()
     main(args.data_root, args.out_root,
          bg_root=args.bg_root, seed=args.seed, composite_prob=args.composite_prob,
-         fill_holes_black=args.fill_holes, crop_mode=args.crop_mode,
+         fill_holes=args.fill_holes, fill_value=(255 if args.fill_color == "white" else 0),
+         crop_mode=args.crop_mode,
          det_gpu_id=args.det_gpu, det_network=args.det_network)
