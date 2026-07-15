@@ -27,8 +27,8 @@ import matplotlib.pyplot as plt
 
 from _init_paths import REPO_ROOT
 from multi_view.data.facescape_dataset import (
-    MultiViewFaceScape, discover_subjects, subject_disjoint_split)
-from multi_view.mv_model import MultiViewLandmark3D
+    MultiViewFaceScape, discover_subject_folders, subject_train_val_split)
+from multi_view.model import MultiViewLandmark3D
 
 
 def project_np(world: np.ndarray, P: np.ndarray) -> np.ndarray:
@@ -55,10 +55,10 @@ def main():
           f"  depth={'OFF' if t.get('no_depth') else 'ON'}")
 
     # reconstruct the EXACT held-out split the model never saw
-    subs = discover_subjects(root)
+    subs = discover_subject_folders(root)
     if t.get("limit"):
         subs = subs[: t["limit"]]
-    _, val_ids = subject_disjoint_split(subs, t["val_frac"], t["seed"])
+    _, val_ids = subject_train_val_split(subs, t["val_frac"], t["seed"])
     ds = MultiViewFaceScape(root, val_ids)             # augmentor=None: baked-messy RGB as-is
     print(f"  val subjects: {len(val_ids)}  (val_frac={t['val_frac']}, seed={t['seed']})")
 

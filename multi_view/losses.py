@@ -1,13 +1,3 @@
-"""Phase 6 - deep-supervised losses for the multi-view 3D-landmark decoder.
-
-Two terms, summed over ALL decoder layers (auxiliary/deep supervision, the DETR
-trick that stabilizes training):
-  - 3D landmark L1 between each layer's predicted 3D and the GT.
-  - per-view 2D L1 between each layer's refined pixel landmarks and the GT pixels,
-    MASKED by visibility (the 2D is what triangulation consumes, so only supervise
-    views where the landmark is actually seen).
-"""
-
 from __future__ import annotations
 
 import torch
@@ -15,15 +5,14 @@ import torch.nn.functional as F
 
 
 def masked_l1_2d(pred: torch.Tensor, gt: torch.Tensor, vis: torch.Tensor) -> torch.Tensor:
-    """pred, gt: (B,N,Q,2); vis: (B,N,Q). Mean L1 over visible entries only."""
-    m = vis.unsqueeze(-1)                       # (B,N,Q,1)
+    """visibility-masked 2D loss"""
+    m = vis.unsqueeze(-1)
     diff = (pred - gt).abs() * m
-    return diff.sum() / (m.sum() * 2 + 1e-6)    # *2: two coords per landmark
+    return diff.sum() / (m.sum() * 2 + 1e-6)
 
 
 def decoder_losses(preds_3d, preds_2d, gt_3d, gt_2d, vis, lambda_2d: float = 0.1):
-    """preds_3d: list[(B,Q,3)], preds_2d: list[(B,N,Q,2)] (one per decoder layer).
-    Returns a dict with the total and each component (for logging)."""
+    """Returns a dict with the total and each component (for logging)."""
     loss_3d = preds_3d[0].new_zeros(())
     loss_2d = preds_3d[0].new_zeros(())
     for p3, p2 in zip(preds_3d, preds_2d):

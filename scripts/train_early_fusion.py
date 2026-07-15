@@ -1,20 +1,13 @@
-"""Phase 7 - train the early-fusion multi-view 3D-landmark model on FaceScape.
-
-Subject-disjoint split, from-scratch backbone, deep-supervised losses. Reports
-held-out MPJPE (mean per-joint 3D error, mm). The RGB-vs-RGBD ablation is the
---no-depth flag (same everything, depth channel zeroed).
-
+"""
 Example:
     .venv/bin/python scripts/train_early_fusion.py \
         --root data/facescape/virtual_camera_data --epochs 40 --bs 2 --lr 1e-4
-
-Run it yourself (GPU strongly recommended). On Great Lakes, wrap in the usual
-sbatch; locally, use a small --bs and --img-size 256.
 """
 
 import _init_paths  # noqa: F401
 import argparse
 import csv
+import json
 import time
 from pathlib import Path
 
@@ -22,11 +15,10 @@ import torch
 from torch.utils.data import DataLoader
 
 from _init_paths import REPO_ROOT
-from multi_view.data.augment import AugConfig, MultiViewAugmentor
 from multi_view.data.facescape_dataset import (
-    MultiViewFaceScape, discover_subjects, subject_disjoint_split)
+    MultiViewFaceScape, discover_subject_folders, subject_train_val_split)
 from multi_view.losses import decoder_losses, mpjpe_mm
-from multi_view.mv_model import MultiViewLandmark3D
+from multi_view.model import MultiViewLandmark3D
 
 
 def parse_args():
@@ -44,17 +36,8 @@ def parse_args():
     p.add_argument("--val-frac", type=float, default=0.2)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--workers", type=int, default=4)
-    p.add_argument("--limit", type=int, default=0, help="cap #subjects (0=all) for quick runs")
+    p.add_argument("--limit", type=int, default=0, help="cap #subjects (0=all) for quick smoke tests")
     p.add_argument("--no-depth", action="store_true", help="RGB-only ablation arm")
-    # iter-2 "messy data" domain randomization (applied to BOTH splits: train random,
-    # val fixed-per-sample). Only RGB is augmented; depth + GT stay clean.
-    p.add_argument("--bg-dir", default=str(REPO_ROOT / "data/backgrounds/indoor/Images"),
-                   help="background image pool for compositing")
-    p.add_argument("--bg-prob", type=float, default=0.0,
-                   help="per-view prob of compositing a random background (0=off)")
-    p.add_argument("--photometric", action="store_true",
-                   help="apply HRNet's photometric ISP pipeline per view "
-                        "(brightness/contrast/saturation/hue/blur/downscale/noise/JPEG)")
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     return p.parse_args()
 
@@ -87,7 +70,7 @@ def main():
     torch.manual_seed(args.seed)
     out = Path(args.out); out.mkdir(parents=True, exist_ok=True)
 
-    # Persist per-epoch metrics: metrics.csv (structured) + train.log (raw console).
+    # Record per-epoch metrics: metrics.csv (structured) + train.log (raw console).
     logf = open(out / "train.log", "w")
 
     def logprint(msg):
@@ -100,24 +83,27 @@ def main():
                      "skipped", "sec"])
     csvf.flush()
 
-    subs = discover_subjects(args.root)
+    subs = discover_subject_folders(args.root)
     if args.limit:
         subs = subs[: args.limit]
-    train_ids, val_ids = subject_disjoint_split(subs, args.val_frac, args.seed)
-    aug_cfg = AugConfig(bg_dir=args.bg_dir, bg_prob=args.bg_prob,
-                        photometric=args.photometric)
-    aug_note = (f"  aug[bg={args.bg_prob} photometric={args.photometric}]"
-                if aug_cfg.enabled else "")
+    train_ids, val_ids = subject_train_val_split(subs, args.val_frac, args.seed)
     logprint(f"subjects: {len(subs)}  train {len(train_ids)}  val {len(val_ids)}  "
-             f"depth={'OFF' if args.no_depth else 'ON'}{aug_note}")
+             f"depth={'OFF' if args.no_depth else 'ON'}  -> split.json")
 
-    # One augmentor instance (shared bg pool); train = fresh randomness, val =
-    # deterministic per-sample so the held-out metric is stable across epochs.
-    augmentor = MultiViewAugmentor(aug_cfg) if aug_cfg.enabled else None
-    train_ds = MultiViewFaceScape(args.root, train_ids, augmentor=augmentor,
-                                  aug_deterministic=False)
-    val_ds = MultiViewFaceScape(args.root, val_ids, augmentor=augmentor,
-                                aug_deterministic=True, aug_seed=args.seed)
+    # Record subject train-val split
+    (out / "split.json").write_text(json.dumps({
+        "root": str(args.root),
+        "seed": args.seed,
+        "val_frac": args.val_frac,
+        "limit": args.limit,
+        "n_subjects": len(subs),
+        "train_ids": train_ids,
+        "val_ids": val_ids,
+    }, indent=2))
+
+
+    train_ds = MultiViewFaceScape(args.root, train_ids)
+    val_ds = MultiViewFaceScape(args.root, val_ids)
     train_ld = DataLoader(train_ds, batch_size=args.bs, shuffle=True,
                           num_workers=args.workers, drop_last=True)
     val_ld = DataLoader(val_ds, batch_size=args.bs, shuffle=False,
@@ -146,10 +132,7 @@ def main():
                 continue
             opt.zero_grad()
             loss.backward()
-            # Clip returns the pre-clip total grad norm; if the grads themselves are
-            # non-finite (e.g. an SVD-backward NaN), skip the step so the optimizer
-            # never writes NaN into the weights. This is what makes the run recover
-            # from a single bad batch instead of collapsing permanently.
+            # if the grads themselves are non-finite (e.g. an SVD-backward NaN), skip the step so the optimizer never writes NaN into the weights.
             gnorm = torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
             if torch.isfinite(gnorm):
                 opt.step()

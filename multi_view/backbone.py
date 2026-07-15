@@ -4,13 +4,7 @@ from torchvision.models import resnet50
 
 
 class RGBDPoseResNet50(nn.Module):
-    """ResNet-50 with a 4-channel (RGBD) first conv and a PoseResNet-style
-    deconv head (Xiao, Wu & Wei, ECCV 2018, "Simple Baselines for Human Pose
-    Estimation and Tracking"). Output spatial resolution is input / 4.
-
-    From-scratch only: the 4-channel conv1 and the whole ResNet body are randomly
-    initialized (no ImageNet weights). This is the committed training regime; the
-    old ImageNet-pretrained 4-ch bridge was scaffolding and has been removed.
+    """ResNet-50 with a 4-channel (RGBD) with pooling cropped and added 3 layers of deconv head 
     """
 
     def __init__(
@@ -19,8 +13,8 @@ class RGBDPoseResNet50(nn.Module):
         deconv_channels: int = 256,
     ) -> None:
         super().__init__()
-        rn = resnet50(weights=None)
-        rn.conv1 = nn.Conv2d(4, 64, kernel_size=7, stride=2, padding=3, bias=False) # 4-ch RGBD input, random init
+        rn = resnet50(weights=None) # random initialized weight for now, may change in the future
+        rn.conv1 = nn.Conv2d(4, 64, kernel_size=7, stride=2, padding=3, bias=False) # swap for 4 channel
 
         # Include Stage 1-5
         self.conv1 = rn.conv1
@@ -32,7 +26,7 @@ class RGBDPoseResNet50(nn.Module):
         self.layer3 = rn.layer3
         self.layer4 = rn.layer4
 
-        # Add 3 layers of  deconvolution
+        # Add 3 layers of deconv
         self.deconv_head = self._build_deconv_head(
             in_channels=2048,
             num_layers=num_deconv_layers,
@@ -69,16 +63,15 @@ class RGBDPoseResNet50(nn.Module):
 
 
 class MultiViewBackbone(nn.Module):
-    """Phase 3 - run the shared RGBD backbone over all N views of each sample.
-
-        input   rgbd   (B, N, 4, H, W)     B samples, N views each
-        output  feats  (B, N, C, H/4, W/4)  C = backbone.out_channels (256)
-
-    The backbone is view-agnostic: the SAME weights process every view. So
-    instead of looping over views, we fold the N-view axis into the batch
-    dimension, do one backbone pass, then unfold. The only thing to get right is
-    the bookkeeping -- the unfold must restore (B, N, ...) in the same order the
-    fold flattened them.
+    """run the RGBD backbone over all N views of each sample.
+    
+    Args:
+        rgbd (B, N, 4, H, W): B samples, N views each
+        
+    Returns:
+        features (B, N, C, H/4, W/4)  C = backbone.out_channels (256)
+        
+    The same weights process every view. So instead of looping over views, fold the N-view axis into the batch dimension, do one backbone pass, then unfold.
     """
 
     def __init__(self, deconv_channels: int = 256) -> None:
@@ -88,17 +81,10 @@ class MultiViewBackbone(nn.Module):
 
     def forward(self, rgbd: torch.Tensor) -> torch.Tensor:
         B, N, C, H, W = rgbd.shape
-
-        # BLANK 1: fold the N view axis into the batch dim so one backbone pass
-        # handles all views. Target shape (B*N, C, H, W).
-        # Hint: reshape/view is row-major -> B is the OUTER index, N the INNER, so
-        # element (b, n) lands at row b*N + n. Keep that order for the unfold.
+        # folds, B*N images feed in at once
         x = rgbd.reshape(B*N, C, H, W)
+        features = self.backbone(x)
+        # unfold
+        features = features.reshape(B, N, self.out_channels, features.shape[-2], features.shape[-1])
 
-        feats = self.backbone(x)
-
-        # BLANK 2: unfold the batch dim back to (B, N, out_channels, H/4, W/4).
-        # Use feats' own spatial size (H/4, W/4), not H, W.
-        feats = feats.reshape(B, N, self.out_channels, feats.shape[-2], feats.shape[-1])
-
-        return feats
+        return features

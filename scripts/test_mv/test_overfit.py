@@ -16,9 +16,9 @@ import os
 import torch
 
 from _init_paths import REPO_ROOT
-from multi_view.data.facescape_dataset import MultiViewFaceScape, discover_subjects
+from multi_view.data.facescape_dataset import MultiViewFaceScape, discover_subject_folders
 from multi_view.losses import decoder_losses, mpjpe_mm
-from multi_view.mv_model import MultiViewLandmark3D
+from multi_view.model import MultiViewLandmark3D
 
 ROOT = REPO_ROOT / "data" / "facescape" / "virtual_camera_data"
 ASSETS = REPO_ROOT / "multi_view" / "assets"
@@ -29,7 +29,7 @@ def main() -> None:
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"device: {device}")
 
-    subs = discover_subjects(ROOT)[:1]
+    subs = discover_subject_folders(ROOT)[:1]
     s = MultiViewFaceScape(ROOT, subs)[0]
     rgbd = s["rgbd"].unsqueeze(0).to(device)
     proj = s["proj"].unsqueeze(0).to(device)

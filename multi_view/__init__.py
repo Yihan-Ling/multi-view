@@ -1,25 +1,20 @@
-"""multi_view package.
-
-The torch model classes (``RGBDPoseResNet50``, ``MultiViewBackbone``,
-``MultiViewLandmark3D``) are imported lazily so that lightweight subpackages such
-as ``multi_view.data`` can be used in an environment without torch (e.g. the
-FaceScape render venv).
+"""Separate import heavy modules (the torch model classes) and light modules so the torch-free subpackage `multi_view.data` still imports in an environment without torch
 """
 
-_LAZY = {
+HEAVY = {
     "RGBDPoseResNet50": "multi_view.backbone",
     "MultiViewBackbone": "multi_view.backbone",
     "MultiViewLandmark3D": "multi_view.mv_model",
 }
 
-__all__ = list(_LAZY)
+__all__ = list(HEAVY)
 
 
 def __getattr__(name):  # PEP 562
-    if name in _LAZY:
+    if name in HEAVY:
         import importlib
 
-        return getattr(importlib.import_module(_LAZY[name]), name)
+        return getattr(importlib.import_module(HEAVY[name]), name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
